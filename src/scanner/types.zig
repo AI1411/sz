@@ -8,18 +8,20 @@ pub const DirEntry = struct {
     file_count: u32,
     dir_count: u32,
     children: []DirEntry,
+    /// ディレクトリツリーの深さ。最大255階層を上限とする（u8: 0-255）。
+    /// CLIの --depth 引数（u32）からこのフィールドへ代入する際は clamp が必要。
     depth: u8,
 
     /// name フィールドから Zig スライスとして名前を取得する。
-    pub fn nameSlice(self: DirEntry) []const u8 {
+    pub fn nameSlice(self: *const DirEntry) []const u8 {
         return self.name[0..self.name_len];
     }
 };
 
 /// スキャン全体の結果を保持する型。
+/// メモリ管理は呼び出し側の ArenaAllocator で行う（arena.deinit() で一括解放）。
 pub const ScanResult = struct {
     root: DirEntry,
-    allocator: std.mem.Allocator,
 };
 
 test "DirEntry nameSlice" {
