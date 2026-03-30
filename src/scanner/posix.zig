@@ -14,6 +14,15 @@ fn getDeviceId(dir: std.fs.Dir) !posix.dev_t {
     return stat.dev;
 }
 
+/// (dev, inode) を 128 ビットキーに変換してループ検出に使用する。
+const InodeKey = u128;
+fn inodeKey(dev: posix.dev_t, ino: posix.ino_t) InodeKey {
+    // dev_t は macOS で i32, Linux で u64 など環境依存のため符号拡張してから u64 に変換する
+    const dev64: u64 = @bitCast(@as(i64, dev));
+    const ino64: u64 = @intCast(ino);
+    return (@as(u128, dev64) << 64) | @as(u128, ino64);
+}
+
 fn scanDirRecursive(
     allocator: std.mem.Allocator,
     dir: std.fs.Dir,
@@ -21,6 +30,7 @@ fn scanDirRecursive(
     depth: u8,
     root_dev: posix.dev_t,
     options: ScanOptions,
+    visited: *std.AutoHashMap(InodeKey, void),
 ) !types.DirEntry {
     var total_size: u64 = 0;
     var file_count: u32 = 0;
@@ -62,9 +72,24 @@ fn scanDirRecursive(
                             if (child_dev != root_dev) continue;
                         }
 
+                        // ループ検出: 既に訪問済みの inode はスキップ
+                        const child_stat = posix.fstat(child_dir.fd) catch continue;
+                        const key = inodeKey(child_stat.dev, child_stat.ino);
+                        if (visited.contains(key)) {
+                            var warn_buf: [512]u8 = undefined;
+                            const warn_msg = std.fmt.bufPrint(
+                                &warn_buf,
+                                "sz: warning: symbolic link loop detected at '{s}'\n",
+                                .{entry.name},
+                            ) catch "sz: warning: symlink loop detected\n";
+                            std.fs.File.stderr().writeAll(warn_msg) catch {};
+                            continue;
+                        }
+                        try visited.put(key, {});
+
                         dir_count += 1;
                         const next_depth: u8 = if (depth < 255) depth + 1 else 255;
-                        const child = try scanDirRecursive(allocator, child_dir, entry.name, next_depth, root_dev, options);
+                        const child = try scanDirRecursive(allocator, child_dir, entry.name, next_depth, root_dev, options, visited);
                         total_size += child.total_size;
                         file_count += child.file_count;
                         dir_count += child.dir_count;
@@ -100,7 +125,7 @@ fn scanDirRecursive(
 
                 dir_count += 1;
                 const next_depth: u8 = if (depth < 255) depth + 1 else 255;
-                const child = try scanDirRecursive(allocator, child_dir, entry.name, next_depth, root_dev, options);
+                const child = try scanDirRecursive(allocator, child_dir, entry.name, next_depth, root_dev, options, visited);
                 total_size += child.total_size;
                 file_count += child.file_count;
                 dir_count += child.dir_count;
@@ -143,9 +168,15 @@ pub fn scan(
     var root_dir = try std.fs.openDirAbsolute(real_path, .{ .iterate = true, .no_follow = true });
     defer root_dir.close();
 
-    const root_dev = try getDeviceId(root_dir);
+    const root_stat = try posix.fstat(root_dir.fd);
+    const root_dev = root_stat.dev;
     const basename = std.fs.path.basename(real_path);
     const root_name = if (basename.len == 0) "." else basename;
+
+    // visited inode セット: ループ検出用。Arena allocator を共有する。
+    var visited = std.AutoHashMap(InodeKey, void).init(allocator);
+    defer visited.deinit();
+    try visited.put(inodeKey(root_stat.dev, root_stat.ino), {});
 
     const root = try scanDirRecursive(
         allocator,
@@ -154,6 +185,7 @@ pub fn scan(
         0,
         root_dev,
         options,
+        &visited,
     );
 
     return types.ScanResult{ .root = root };

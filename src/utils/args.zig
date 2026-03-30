@@ -4,6 +4,8 @@ pub const Args = struct {
     path: []const u8,
     depth: u32,
     top: u32,
+    help: bool,
+    version: bool,
 };
 
 const default_path = ".";
@@ -17,6 +19,8 @@ fn parseCore(argv: []const []const u8) !Args {
     var path_set = false;
     var depth: u32 = default_depth;
     var top: u32 = default_top;
+    var help: bool = false;
+    var version: bool = false;
 
     var i: usize = 0;
     while (i < argv.len) : (i += 1) {
@@ -42,6 +46,10 @@ fn parseCore(argv: []const []const u8) !Args {
                 std.debug.print("error: invalid top value '{s}'\n", .{argv[i]});
                 return error.InvalidArgument;
             };
+        } else if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
+            help = true;
+        } else if (std.mem.eql(u8, arg, "-V") or std.mem.eql(u8, arg, "--version")) {
+            version = true;
         } else if (std.mem.startsWith(u8, arg, "-")) {
             std.debug.print("error: unknown option '{s}'\n", .{arg});
             return error.InvalidArgument;
@@ -55,7 +63,7 @@ fn parseCore(argv: []const []const u8) !Args {
         }
     }
 
-    return Args{ .path = path, .depth = depth, .top = top };
+    return Args{ .path = path, .depth = depth, .top = top, .help = help, .version = version };
 }
 
 /// Parse CLI arguments from the real process argv.
@@ -144,4 +152,30 @@ test "non-numeric top returns error" {
 
 test "too many path arguments returns error" {
     try std.testing.expectError(error.InvalidArgument, parseSlice(&.{ "/tmp", "/var" }));
+}
+
+test "parse --help sets help flag" {
+    const parsed = try parseSlice(&.{"--help"});
+    try std.testing.expect(parsed.help);
+}
+
+test "parse -h sets help flag" {
+    const parsed = try parseSlice(&.{"-h"});
+    try std.testing.expect(parsed.help);
+}
+
+test "parse --version sets version flag" {
+    const parsed = try parseSlice(&.{"--version"});
+    try std.testing.expect(parsed.version);
+}
+
+test "parse -V sets version flag" {
+    const parsed = try parseSlice(&.{"-V"});
+    try std.testing.expect(parsed.version);
+}
+
+test "default args: help and version are false" {
+    const parsed = try parseSlice(&.{});
+    try std.testing.expect(!parsed.help);
+    try std.testing.expect(!parsed.version);
 }
