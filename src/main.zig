@@ -8,6 +8,9 @@ const types = @import("types");
 const pattern_filter = @import("filter/pattern.zig");
 const size_filter = @import("filter/size.zig");
 const preset_mod = @import("filter/preset.zig");
+const json_export = @import("export/json.zig");
+const csv_export = @import("export/csv.zig");
+const snapshot = @import("export/snapshot.zig");
 
 const version_str = "0.1.0";
 
@@ -32,6 +35,9 @@ const help_text =
     \\      --exclude PATTERN  Exclude entries matching PATTERN (repeatable)
     \\      --only PATTERN     Show only entries matching PATTERN (repeatable, comma-separated)
     \\      --preset NAME      Apply preset filter (dev, media, logs)
+    \\      --json             Output result as JSON
+    \\      --csv              Output result as CSV
+    \\      --save <PATH>      Save scan result as JSON snapshot
     \\  -h, --help             Show this help message
     \\  -V, --version          Show version
     \\
@@ -119,6 +125,35 @@ pub fn main() !void {
         min_size,
         max_size,
     );
+
+    // --save: JSON スナップショットをファイルに保存
+    if (parsed.save_path) |sp| {
+        try snapshot.save(allocator, &filtered_root, parsed.path, elapsed_ms, sp);
+        return;
+    }
+
+    // --json: JSON 形式で stdout へ出力
+    if (parsed.json) {
+        var out: std.ArrayList(u8) = .{};
+        defer out.deinit(allocator);
+        try json_export.render(out.writer(allocator), allocator, &filtered_root, .{
+            .root_path = parsed.path,
+            .scan_time_ms = elapsed_ms,
+        });
+        try std.fs.File.stdout().writeAll(out.items);
+        return;
+    }
+
+    // --csv: CSV 形式で stdout へ出力
+    if (parsed.csv) {
+        var out: std.ArrayList(u8) = .{};
+        defer out.deinit(allocator);
+        try csv_export.render(out.writer(allocator), &filtered_root, .{
+            .root_path = parsed.path,
+        });
+        try std.fs.File.stdout().writeAll(out.items);
+        return;
+    }
 
     var out: std.ArrayList(u8) = .{};
     defer out.deinit(allocator);
