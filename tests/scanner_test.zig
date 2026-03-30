@@ -241,3 +241,31 @@ test "fixture: large_dir - 11 files" {
     try std.testing.expectEqual(@as(u32, 11), result.root.file_count);
     try std.testing.expectEqual(@as(u64, 660), result.root.total_size);
 }
+
+// ─── Issue #55: stderr 権限警告出力 ───────────────────────────────────────────
+
+test "scan: perm_errors count tracks number of denied directories" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makeDir("denied1");
+    try tmp.dir.makeDir("denied2");
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var path_buf2: [std.fs.max_path_bytes]u8 = undefined;
+    const d1 = try tmp.dir.realpath("denied1", &path_buf);
+    try std.posix.fchmodat(std.posix.AT.FDCWD, d1, 0o000, 0);
+    const d2 = try tmp.dir.realpath("denied2", &path_buf2);
+    try std.posix.fchmodat(std.posix.AT.FDCWD, d2, 0o000, 0);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const root_path = try tmp.dir.realpath(".", &path_buf);
+    const result = try scanner.scan(arena.allocator(), root_path, .{});
+
+    try std.posix.fchmodat(std.posix.AT.FDCWD, d1, 0o755, 0);
+    try std.posix.fchmodat(std.posix.AT.FDCWD, d2, 0o755, 0);
+
+    try std.testing.expectEqual(@as(u32, 2), result.perm_errors);
+}

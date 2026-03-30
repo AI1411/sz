@@ -138,6 +138,17 @@ pub fn main() !void {
     });
     const elapsed_ms = std.time.milliTimestamp() - start_ms;
 
+    // 権限エラーサマリーを stderr に出力
+    if (result.perm_errors > 0) {
+        std.debug.print(
+            "sz: {d} {s} could not be accessed (permission denied)\n",
+            .{
+                result.perm_errors,
+                if (result.perm_errors == 1) "directory" else "directories",
+            },
+        );
+    }
+
     // 現在時刻 (--older フィルタ用)
     const now_sec: i64 = @divTrunc(std.time.milliTimestamp(), 1000);
 
