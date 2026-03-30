@@ -3,14 +3,16 @@ const args_mod = @import("utils/args.zig");
 const scanner = @import("scanner/parallel.zig");
 const tree = @import("render/tree.zig");
 const flat = @import("render/flat.zig");
+const compare_render = @import("render/compare.zig");
 const size_fmt = @import("size_fmt");
 const types = @import("types");
 const pattern_filter = @import("filter/pattern.zig");
 const size_filter = @import("filter/size.zig");
+const age_filter = @import("filter/age.zig");
 const preset_mod = @import("filter/preset.zig");
-const json_export = @import("export/json.zig");
-const csv_export = @import("export/csv.zig");
-const snapshot = @import("export/snapshot.zig");
+const json_export = @import("json_export");
+const csv_export = @import("csv_export");
+const snapshot = @import("snapshot");
 
 const version_str = "0.1.0";
 
@@ -38,6 +40,10 @@ const help_text =
     \\      --json             Output result as JSON
     \\      --csv              Output result as CSV
     \\      --save <PATH>      Save scan result as JSON snapshot
+    \\      --apparent         Use apparent size (st_size) instead of disk usage
+    \\      --older <Nd>       Show only entries older than N days (e.g. 30d)
+    \\      --assert-max <SZ>  Exit 1 if total size exceeds SIZE (e.g. 500MB)
+    \\      --compare <PATH>   Compare with saved JSON snapshot
     \\  -h, --help             Show this help message
     \\  -V, --version          Show version
     \\
@@ -108,13 +114,24 @@ pub fn main() !void {
         break :blk null;
     } else null;
 
+    // --older の日数をパース
+    const older_days: ?u32 = if (parsed.older_str) |s| age_filter.parseDays(s) catch blk: {
+        std.debug.print("error: invalid older value '{s}' (expected e.g. 30d)\n", .{s});
+        std.process.exit(1);
+        break :blk null;
+    } else null;
+
     const start_ms = std.time.milliTimestamp();
     const result = try scanner.scan(allocator, parsed.path, .{
         .follow_symlinks = parsed.follow_links,
         .cross_mount = parsed.cross_mount,
         .jobs = parsed.jobs,
+        .apparent = parsed.apparent,
     });
     const elapsed_ms = std.time.milliTimestamp() - start_ms;
+
+    // 現在時刻 (--older フィルタ用)
+    const now_sec: i64 = @divTrunc(std.time.milliTimestamp(), 1000);
 
     // フィルタリングされた DirEntry ツリーを構築する
     const filtered_root = try filterTree(
@@ -124,7 +141,40 @@ pub fn main() !void {
         parsed.onlyPatterns(),
         min_size,
         max_size,
+        older_days,
+        now_sec,
     );
+
+    // --assert-max: 閾値を超えた場合は exit 1
+    if (parsed.assert_max_str) |ams| {
+        const assert_max = size_fmt.parse(ams) catch {
+            std.debug.print("error: invalid size value '{s}'\n", .{ams});
+            std.process.exit(1);
+        };
+        if (filtered_root.total_size > assert_max) {
+            var actual_buf: [16]u8 = undefined;
+            var limit_buf: [16]u8 = undefined;
+            std.debug.print("error: size {s} exceeds limit {s}\n", .{
+                size_fmt.fmt(&actual_buf, filtered_root.total_size),
+                size_fmt.fmt(&limit_buf, assert_max),
+            });
+            std.process.exit(1);
+        }
+        return;
+    }
+
+    // --compare: スナップショットと比較表示
+    if (parsed.compare_path) |cp| {
+        const snap = snapshot.load(allocator, cp) catch |err| {
+            std.debug.print("error: failed to load snapshot '{s}': {s}\n", .{ cp, @errorName(err) });
+            std.process.exit(1);
+        };
+        var out: std.ArrayList(u8) = .{};
+        defer out.deinit(allocator);
+        try compare_render.render(out.writer(allocator), allocator, &filtered_root, &snap);
+        try std.fs.File.stdout().writeAll(out.items);
+        return;
+    }
 
     // --save: JSON スナップショットをファイルに保存
     if (parsed.save_path) |sp| {
@@ -183,6 +233,8 @@ fn filterTree(
     only_patterns: []const []const u8,
     min_size: ?u64,
     max_size: ?u64,
+    older_days: ?u32,
+    now_sec: i64,
 ) !types.DirEntry {
     var filtered: std.ArrayList(types.DirEntry) = .{};
     for (entry.children) |*child| {
@@ -195,7 +247,7 @@ fn filterTree(
         // --only: マッチしなければ除外
         if (only_patterns.len > 0 and !pattern_filter.matchAny(only_patterns, name)) {
             // only フィルタは子ノードをスキップするが、孫以降は個別評価のため再帰は続ける
-            const sub = try filterTree(allocator, child, exclude_patterns, only_patterns, min_size, max_size);
+            const sub = try filterTree(allocator, child, exclude_patterns, only_patterns, min_size, max_size, older_days, now_sec);
             if (sub.children.len > 0) {
                 try filtered.append(allocator, sub);
             }
@@ -205,8 +257,12 @@ fn filterTree(
         if (!size_filter.matchSize(child.total_size, min_size, max_size)) {
             continue;
         }
+        // --older: 日付フィルタ
+        if (!age_filter.matchOlder(child.mtime, now_sec, older_days)) {
+            continue;
+        }
 
-        const sub = try filterTree(allocator, child, exclude_patterns, only_patterns, min_size, max_size);
+        const sub = try filterTree(allocator, child, exclude_patterns, only_patterns, min_size, max_size, older_days, now_sec);
         try filtered.append(allocator, sub);
     }
 
@@ -218,6 +274,7 @@ fn filterTree(
         .dir_count = entry.dir_count,
         .children = try filtered.toOwnedSlice(allocator),
         .depth = entry.depth,
+        .mtime = entry.mtime,
     };
 }
 

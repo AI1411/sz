@@ -31,6 +31,14 @@ pub const Args = struct {
     csv: bool,
     /// --save <path>: スキャン結果を JSON スナップショットとして保存
     save_path: ?[]const u8,
+    /// --apparent: 見かけのサイズ (st_size) を使用する（デフォルト: ディスク使用量）
+    apparent: bool,
+    /// --older <Nd>: N日以上前のエントリのみ表示（例: "30d"）
+    older_str: ?[]const u8,
+    /// --assert-max <SIZE>: 指定サイズを超えた場合は exit 1 を返す
+    assert_max_str: ?[]const u8,
+    /// --compare <path>: 保存済みスナップショットと比較表示
+    compare_path: ?[]const u8,
     /// --exclude パターンバッファ
     exclude_buf: [MAX_PATTERNS][]const u8,
     exclude_count: u8,
@@ -85,6 +93,10 @@ fn parseCore(argv: []const []const u8) !Args {
     var json: bool = false;
     var csv: bool = false;
     var save_path: ?[]const u8 = null;
+    var apparent: bool = false;
+    var older_str: ?[]const u8 = null;
+    var assert_max_str: ?[]const u8 = null;
+    var compare_path: ?[]const u8 = null;
     var exclude_buf: [MAX_PATTERNS][]const u8 = undefined;
     var exclude_count: u8 = 0;
     var only_buf: [MAX_PATTERNS][]const u8 = undefined;
@@ -180,6 +192,29 @@ fn parseCore(argv: []const []const u8) !Args {
                 return error.InvalidArgument;
             }
             save_path = argv[i];
+        } else if (std.mem.eql(u8, arg, "--apparent")) {
+            apparent = true;
+        } else if (std.mem.eql(u8, arg, "--older")) {
+            i += 1;
+            if (i >= argv.len) {
+                std.debug.print("error: {s} requires a day argument (e.g. 30d)\n", .{arg});
+                return error.InvalidArgument;
+            }
+            older_str = argv[i];
+        } else if (std.mem.eql(u8, arg, "--assert-max")) {
+            i += 1;
+            if (i >= argv.len) {
+                std.debug.print("error: {s} requires a size argument\n", .{arg});
+                return error.InvalidArgument;
+            }
+            assert_max_str = argv[i];
+        } else if (std.mem.eql(u8, arg, "--compare")) {
+            i += 1;
+            if (i >= argv.len) {
+                std.debug.print("error: {s} requires a file path argument\n", .{arg});
+                return error.InvalidArgument;
+            }
+            compare_path = argv[i];
         } else if (std.mem.eql(u8, arg, "--flat")) {
             flat = true;
         } else if (std.mem.eql(u8, arg, "-L") or std.mem.eql(u8, arg, "--follow-links")) {
@@ -219,6 +254,10 @@ fn parseCore(argv: []const []const u8) !Args {
         .json = json,
         .csv = csv,
         .save_path = save_path,
+        .apparent = apparent,
+        .older_str = older_str,
+        .assert_max_str = assert_max_str,
+        .compare_path = compare_path,
         .exclude_buf = exclude_buf,
         .exclude_count = exclude_count,
         .only_buf = only_buf,
@@ -257,6 +296,15 @@ pub fn parse(allocator: std.mem.Allocator) !Args {
     if (result.save_path) |s| {
         result.save_path = try allocator.dupe(u8, s);
     }
+    if (result.older_str) |s| {
+        result.older_str = try allocator.dupe(u8, s);
+    }
+    if (result.assert_max_str) |s| {
+        result.assert_max_str = try allocator.dupe(u8, s);
+    }
+    if (result.compare_path) |s| {
+        result.compare_path = try allocator.dupe(u8, s);
+    }
     return result;
 }
 
@@ -282,6 +330,10 @@ test "default args" {
     try std.testing.expect(!parsed.json);
     try std.testing.expect(!parsed.csv);
     try std.testing.expect(parsed.save_path == null);
+    try std.testing.expect(!parsed.apparent);
+    try std.testing.expect(parsed.older_str == null);
+    try std.testing.expect(parsed.assert_max_str == null);
+    try std.testing.expect(parsed.compare_path == null);
     try std.testing.expectEqual(@as(u8, 0), parsed.exclude_count);
     try std.testing.expectEqual(@as(u8, 0), parsed.only_count);
 }
@@ -455,4 +507,36 @@ test "parse --save sets save_path" {
 
 test "parse --save missing path returns error" {
     try std.testing.expectError(error.InvalidArgument, parseSlice(&.{"--save"}));
+}
+
+test "parse --apparent sets apparent flag" {
+    const parsed = try parseSlice(&.{"--apparent"});
+    try std.testing.expect(parsed.apparent);
+}
+
+test "parse --older sets older_str" {
+    const parsed = try parseSlice(&.{ "--older", "30d" });
+    try std.testing.expectEqualStrings("30d", parsed.older_str.?);
+}
+
+test "parse --older missing value returns error" {
+    try std.testing.expectError(error.InvalidArgument, parseSlice(&.{"--older"}));
+}
+
+test "parse --assert-max sets assert_max_str" {
+    const parsed = try parseSlice(&.{ "--assert-max", "500MB" });
+    try std.testing.expectEqualStrings("500MB", parsed.assert_max_str.?);
+}
+
+test "parse --assert-max missing value returns error" {
+    try std.testing.expectError(error.InvalidArgument, parseSlice(&.{"--assert-max"}));
+}
+
+test "parse --compare sets compare_path" {
+    const parsed = try parseSlice(&.{ "--compare", "snap.json" });
+    try std.testing.expectEqualStrings("snap.json", parsed.compare_path.?);
+}
+
+test "parse --compare missing path returns error" {
+    try std.testing.expectError(error.InvalidArgument, parseSlice(&.{"--compare"}));
 }
