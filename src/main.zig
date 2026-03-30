@@ -215,7 +215,7 @@ pub fn main() !void {
 
     // -i / --interactive: TUIモード
     if (parsed.interactive) {
-        try tui.run(allocator, &filtered_root);
+        try tui.run(allocator, &filtered_root, parsed.path);
         return;
     }
 

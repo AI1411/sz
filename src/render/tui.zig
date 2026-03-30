@@ -55,10 +55,56 @@ const esc = struct {
     const bold = "\x1b[1m";
     const dim = "\x1b[2m";
     const fg_cyan = "\x1b[36m";
-    const fg_yellow = "\x1b[33m";
-    const fg_green = "\x1b[32m";
+    const fg_red = "\x1b[31m";
     const bg_blue = "\x1b[44m";
     const fg_white = "\x1b[37m";
+};
+
+// ─── SIGWINCH: ターミナルリサイズシグナル ────────────────────────────────────
+
+/// SIGWINCH を受信したかどうかのフラグ (シグナルハンドラから書き込む)
+var sigwinch_received = std.atomic.Value(bool).init(false);
+
+/// SIGWINCH シグナルハンドラ
+fn handleSigWinch(_: i32) callconv(.c) void {
+    sigwinch_received.store(true, .monotonic);
+}
+
+/// SIGWINCH ハンドラを登録する
+fn setupSigWinch() void {
+    const act = posix.Sigaction{
+        .handler = .{ .handler = handleSigWinch },
+        .mask = posix.sigemptyset(),
+        .flags = 0, // SA_RESTART を付けないことで read() が EINTR で中断される
+    };
+    posix.sigaction(posix.SIG.WINCH, &act, null);
+}
+
+// ─── ソートモード ─────────────────────────────────────────────────────────────
+
+/// ソート順の種類
+const SortMode = enum {
+    size,
+    name,
+    file_count,
+
+    /// 次のソートモードにサイクルする
+    fn next(self: SortMode) SortMode {
+        return switch (self) {
+            .size => .name,
+            .name => .file_count,
+            .file_count => .size,
+        };
+    }
+
+    /// 表示ラベルを返す
+    fn label(self: SortMode) []const u8 {
+        return switch (self) {
+            .size => "size",
+            .name => "name",
+            .file_count => "files",
+        };
+    }
 };
 
 // ─── キー入力 ─────────────────────────────────────────────────────────────────
@@ -69,6 +115,11 @@ const Key = enum {
     left,
     right,
     enter,
+    sort, // s: ソート切替
+    delete, // d: 削除操作
+    confirm_yes, // y: 削除確認ダイアログで「はい」
+    confirm_no, // n: 削除確認ダイアログで「いいえ」
+    escape, // ESC: キャンセル
     quit,
     unknown,
 };
@@ -76,21 +127,33 @@ const Key = enum {
 /// stdin から1キーを読み取り Key に変換する
 fn readKey() !Key {
     var buf: [4]u8 = undefined;
-    const n = try posix.read(STDIN_FD, &buf);
+    const n = posix.read(STDIN_FD, &buf) catch |err| {
+        // SIGWINCH 等によるシステムコール割り込みは無視して再描画させる
+        if (err == error.Interrupted) return .unknown;
+        return err;
+    };
     if (n == 0) return .unknown;
 
     if (buf[0] == 'q' or buf[0] == 'Q') return .quit;
     if (buf[0] == '\r' or buf[0] == '\n') return .enter;
+    if (buf[0] == 's' or buf[0] == 'S') return .sort;
+    if (buf[0] == 'd' or buf[0] == 'D') return .delete;
+    if (buf[0] == 'y' or buf[0] == 'Y') return .confirm_yes;
+    if (buf[0] == 'n' or buf[0] == 'N') return .confirm_no;
 
     // ESC シーケンス (例: \x1b[A = 上矢印)
-    if (n >= 3 and buf[0] == 0x1b and buf[1] == '[') {
-        return switch (buf[2]) {
-            'A' => .up,
-            'B' => .down,
-            'C' => .right,
-            'D' => .left,
-            else => .unknown,
-        };
+    if (buf[0] == 0x1b) {
+        if (n == 1) return .escape; // 単独 ESC
+        if (n >= 3 and buf[1] == '[') {
+            return switch (buf[2]) {
+                'A' => .up,
+                'B' => .down,
+                'C' => .right,
+                'D' => .left,
+                else => .unknown,
+            };
+        }
+        return .escape;
     }
 
     return .unknown;
@@ -107,8 +170,38 @@ const Item = struct {
     expanded: bool,
 };
 
+/// children をソートモードに従ってインデックスのスライスとして返す。
+/// 呼び出し元が allocator.free する責任を持つ。
+fn sortedChildIndices(
+    allocator: std.mem.Allocator,
+    children: []const types.DirEntry,
+    sort_mode: SortMode,
+) ![]usize {
+    const indices = try allocator.alloc(usize, children.len);
+    for (indices, 0..) |*idx, i| idx.* = i;
+
+    const SortCtx = struct {
+        children: []const types.DirEntry,
+        mode: SortMode,
+
+        fn lessThan(ctx: @This(), a: usize, b: usize) bool {
+            const ca = ctx.children[a];
+            const cb = ctx.children[b];
+            return switch (ctx.mode) {
+                .size => ca.total_size > cb.total_size,
+                .name => std.mem.lessThan(u8, ca.nameSlice(), cb.nameSlice()),
+                .file_count => ca.file_count > cb.file_count,
+            };
+        }
+    };
+
+    std.sort.block(usize, indices, SortCtx{ .children = children, .mode = sort_mode }, SortCtx.lessThan);
+    return indices;
+}
+
 /// DirEntry ツリーを深さ優先でフラットなリストに展開する。
-/// `expanded_set` に含まれるエントリの子も再帰的に追加する。
+/// expanded_set に含まれるエントリの子も再帰的に追加する。
+/// deleted_set に含まれるエントリはスキップする。
 fn buildItemList(
     allocator: std.mem.Allocator,
     list: *std.ArrayList(Item),
@@ -116,6 +209,8 @@ fn buildItemList(
     depth: u32,
     is_last: bool,
     expanded_set: *const std.AutoHashMap(usize, void),
+    deleted_set: *const std.AutoHashMap(usize, void),
+    sort_mode: SortMode,
 ) !void {
     const ptr_key = @intFromPtr(entry);
     const expanded = expanded_set.contains(ptr_key);
@@ -126,9 +221,21 @@ fn buildItemList(
         .expanded = expanded,
     });
     if (expanded and entry.children.len > 0) {
-        for (entry.children, 0..) |*child, i| {
-            const child_is_last = (i == entry.children.len - 1);
-            try buildItemList(allocator, list, child, depth + 1, child_is_last, expanded_set);
+        const indices = try sortedChildIndices(allocator, entry.children, sort_mode);
+        defer allocator.free(indices);
+
+        // 削除済みを除いた表示件数を先にカウント
+        var visible: usize = 0;
+        for (indices) |idx| {
+            if (!deleted_set.contains(@intFromPtr(&entry.children[idx]))) visible += 1;
+        }
+
+        var vi: usize = 0;
+        for (indices) |idx| {
+            const child = &entry.children[idx];
+            if (deleted_set.contains(@intFromPtr(child))) continue;
+            vi += 1;
+            try buildItemList(allocator, list, child, depth + 1, vi == visible, expanded_set, deleted_set, sort_mode);
         }
     }
 }
@@ -141,23 +248,36 @@ const State = struct {
     root_stack: std.ArrayList(*const types.DirEntry),
     /// 展開済みエントリの集合 (ポインタ整数値をキーとする)
     expanded: std.AutoHashMap(usize, void),
+    /// 削除済みエントリの集合 (ポインタ整数値をキーとする)
+    deleted: std.AutoHashMap(usize, void),
     /// カーソル位置 (現在表示中のフラットリストのインデックス)
     cursor: usize,
+    /// 現在のソートモード
+    sort_mode: SortMode,
+    /// 削除確認ダイアログ表示中かどうか
+    confirm_delete: bool,
+    /// スキャンのベースパス (絶対パス)
+    scan_base_path: []const u8,
 
-    fn init(allocator: std.mem.Allocator, root: *const types.DirEntry) !State {
+    fn init(allocator: std.mem.Allocator, root: *const types.DirEntry, scan_base_path: []const u8) !State {
         var stack: std.ArrayList(*const types.DirEntry) = .{};
         try stack.append(allocator, root);
         return State{
             .allocator = allocator,
             .root_stack = stack,
             .expanded = std.AutoHashMap(usize, void).init(allocator),
+            .deleted = std.AutoHashMap(usize, void).init(allocator),
             .cursor = 0,
+            .sort_mode = .size,
+            .confirm_delete = false,
+            .scan_base_path = scan_base_path,
         };
     }
 
     fn deinit(self: *State) void {
         self.root_stack.deinit(self.allocator);
         self.expanded.deinit();
+        self.deleted.deinit();
     }
 
     fn currentRoot(self: *const State) *const types.DirEntry {
@@ -168,11 +288,37 @@ const State = struct {
     fn buildList(self: *const State) !std.ArrayList(Item) {
         var list: std.ArrayList(Item) = .{};
         const root = self.currentRoot();
-        for (root.children, 0..) |*child, i| {
-            const is_last = (i == root.children.len - 1);
-            try buildItemList(self.allocator, &list, child, 0, is_last, &self.expanded);
+
+        const indices = try sortedChildIndices(self.allocator, root.children, self.sort_mode);
+        defer self.allocator.free(indices);
+
+        var visible: usize = 0;
+        for (indices) |idx| {
+            if (!self.deleted.contains(@intFromPtr(&root.children[idx]))) visible += 1;
+        }
+
+        var vi: usize = 0;
+        for (indices) |idx| {
+            const child = &root.children[idx];
+            if (self.deleted.contains(@intFromPtr(child))) continue;
+            vi += 1;
+            try buildItemList(self.allocator, &list, child, 0, vi == visible, &self.expanded, &self.deleted, self.sort_mode);
         }
         return list;
+    }
+
+    /// 現在ディレクトリの絶対パスをバッファに書き込み、スライスを返す。
+    /// root_stack[0] = scan_base_path のルート
+    /// root_stack[1..] = ドリルダウンした子ディレクトリ名
+    fn buildCurrentPath(self: *const State, buf: *[std.fs.max_path_bytes]u8) ![]const u8 {
+        var fbs = std.io.fixedBufferStream(buf);
+        const w = fbs.writer();
+        try w.writeAll(self.scan_base_path);
+        for (self.root_stack.items[1..]) |entry| {
+            try w.writeByte('/');
+            try w.writeAll(entry.nameSlice());
+        }
+        return fbs.getWritten();
     }
 };
 
@@ -187,11 +333,14 @@ const CONNECTOR_LAST = "└── ";
 fn render(writer: anytype, state: *const State, list: []const Item, term_rows: usize) !void {
     try writer.writeAll(esc.clear_screen ++ esc.cursor_home);
 
-    // ヘッダー: 現在のパス
+    // ヘッダー: キーバインド表示 (ソートモードを含む)
     try writer.writeAll(esc.bold ++ esc.fg_cyan);
     try writer.writeAll(" sz - interactive mode");
     try writer.writeAll(esc.reset);
-    try writer.writeAll("  [↑↓] navigate  [Enter] expand/collapse  [←] up  [q] quit\n");
+    try writer.print(
+        "  [↑↓] nav  [Enter] expand  [←→] drill  [s] sort:{s}  [d] del  [q] quit\n",
+        .{state.sort_mode.label()},
+    );
 
     // パス表示
     try writer.writeAll(esc.dim);
@@ -252,13 +401,12 @@ fn render(writer: anytype, state: *const State, list: []const Item, term_rows: u
             try writer.writeAll(esc.bg_blue ++ esc.fg_white ++ esc.bold);
         }
 
-        try writer.print("  {s}{s}{s}{s:>7}  {s}{s}", .{
+        try writer.print("  {s}{s}{s}{s:>7}  {s}", .{
             prefix,
             connector,
             indicator,
             size_str,
             item.entry.nameSlice(),
-            if (is_cursor) "" else "",
         });
 
         if (is_cursor) {
@@ -277,6 +425,14 @@ fn render(writer: anytype, state: *const State, list: []const Item, term_rows: u
     }
     try writer.writeAll(esc.reset);
     try writer.writeByte('\n');
+
+    // 削除確認ダイアログ (オーバーレイ表示)
+    if (state.confirm_delete and list.len > 0) {
+        const item = list[state.cursor];
+        try writer.writeAll(esc.bold ++ esc.fg_red);
+        try writer.print("\n  Delete '{s}'? [y/N] ", .{item.entry.nameSlice()});
+        try writer.writeAll(esc.reset);
+    }
 }
 
 // ─── ターミナルサイズ取得 ──────────────────────────────────────────────────────
@@ -302,7 +458,15 @@ fn getTerminalRows() usize {
 
 /// TUIモードを起動してユーザー操作を処理する。
 /// `root` はスキャン済みの DirEntry ルート。
-pub fn run(allocator: std.mem.Allocator, root: *const types.DirEntry) !void {
+/// `scan_path` はスキャン対象パス (絶対・相対どちらでも可)。
+pub fn run(allocator: std.mem.Allocator, root: *const types.DirEntry, scan_path: []const u8) !void {
+    // スキャンパスを絶対パスに解決 (失敗時はそのまま使う)
+    var base_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const base_path = std.fs.cwd().realpath(scan_path, &base_path_buf) catch scan_path;
+
+    // SIGWINCH ハンドラを設定 (ターミナルリサイズ対応)
+    setupSigWinch();
+
     try enterRawMode();
     defer exitRawMode();
 
@@ -310,7 +474,7 @@ pub fn run(allocator: std.mem.Allocator, root: *const types.DirEntry) !void {
     try std.fs.File.stdout().writeAll(esc.cursor_hide);
     defer std.fs.File.stdout().writeAll(esc.cursor_show) catch {};
 
-    var state = try State.init(allocator, root);
+    var state = try State.init(allocator, root, base_path);
     defer state.deinit();
 
     // フレームバッファ: 1フレーム分の出力を溜めてから一括出力することでちらつきを防ぐ
@@ -327,6 +491,50 @@ pub fn run(allocator: std.mem.Allocator, root: *const types.DirEntry) !void {
         try std.fs.File.stdout().writeAll(frame_buf.items);
 
         const key = try readKey();
+
+        // ─── 削除確認モード中のキー処理 ─────────────────────────────────────
+        if (state.confirm_delete) {
+            switch (key) {
+                .confirm_yes => {
+                    state.confirm_delete = false;
+                    if (list.items.len > 0) {
+                        const item = list.items[state.cursor];
+                        // 削除対象の絶対パスを構築
+                        var current_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+                        const current_dir = try state.buildCurrentPath(&current_path_buf);
+                        var full_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+                        const full_path = try std.fmt.bufPrint(
+                            &full_path_buf,
+                            "{s}/{s}",
+                            .{ current_dir, item.entry.nameSlice() },
+                        );
+                        // ファイルまたはディレクトリを削除
+                        std.fs.deleteFileAbsolute(full_path) catch |e| {
+                            if (e == error.IsDir) {
+                                std.fs.deleteTreeAbsolute(full_path) catch {};
+                            }
+                        };
+                        // 削除済みセットに追加してリストから除外
+                        try state.deleted.put(@intFromPtr(item.entry), {});
+                        // カーソル位置を調整
+                        var new_list = try state.buildList();
+                        defer new_list.deinit(allocator);
+                        if (new_list.items.len > 0 and state.cursor >= new_list.items.len) {
+                            state.cursor = new_list.items.len - 1;
+                        } else if (new_list.items.len == 0) {
+                            state.cursor = 0;
+                        }
+                    }
+                },
+                // y 以外はすべてキャンセル
+                else => {
+                    state.confirm_delete = false;
+                },
+            }
+            continue;
+        }
+
+        // ─── 通常モードのキー処理 ────────────────────────────────────────────
         switch (key) {
             .quit => break,
 
@@ -382,7 +590,20 @@ pub fn run(allocator: std.mem.Allocator, root: *const types.DirEntry) !void {
                 }
             },
 
-            .unknown => {},
+            .sort => {
+                // ソートモードをサイクル: size → name → files → size
+                state.sort_mode = state.sort_mode.next();
+                state.cursor = 0;
+            },
+
+            .delete => {
+                // 削除確認ダイアログを表示
+                if (list.items.len > 0) {
+                    state.confirm_delete = true;
+                }
+            },
+
+            .confirm_yes, .confirm_no, .escape, .unknown => {},
         }
     }
 
@@ -415,16 +636,19 @@ test "buildItemList: flat entries (no expansion)" {
     const root = makeEntry(".", 300, &children);
     var expanded = std.AutoHashMap(usize, void).init(allocator);
     defer expanded.deinit();
+    var deleted = std.AutoHashMap(usize, void).init(allocator);
+    defer deleted.deinit();
 
     var list: std.ArrayList(Item) = .{};
     defer list.deinit(allocator);
 
     for (root.children, 0..) |*child, i| {
-        try buildItemList(allocator, &list, child, 0, i == root.children.len - 1, &expanded);
+        try buildItemList(allocator, &list, child, 0, i == root.children.len - 1, &expanded, &deleted, .size);
     }
 
     // 展開なしなので a, b の2項目のみ
     try std.testing.expectEqual(@as(usize, 2), list.items.len);
+    // サイズ降順ソートなので b(200) が先 (ただしここでは親ループで追加しているため順序は元のまま)
     try std.testing.expectEqualStrings("a", list.items[0].entry.nameSlice());
     try std.testing.expectEqualStrings("b", list.items[1].entry.nameSlice());
 }
@@ -440,6 +664,8 @@ test "buildItemList: expanded entry shows children" {
     const root = makeEntry(".", 150, &children);
     var expanded = std.AutoHashMap(usize, void).init(allocator);
     defer expanded.deinit();
+    var deleted = std.AutoHashMap(usize, void).init(allocator);
+    defer deleted.deinit();
 
     // parent を展開済みとしてマーク
     try expanded.put(@intFromPtr(&children[0]), {});
@@ -448,7 +674,7 @@ test "buildItemList: expanded entry shows children" {
     defer list.deinit(allocator);
 
     for (root.children, 0..) |*child, i| {
-        try buildItemList(allocator, &list, child, 0, i == root.children.len - 1, &expanded);
+        try buildItemList(allocator, &list, child, 0, i == root.children.len - 1, &expanded, &deleted, .size);
     }
 
     // parent + child1 の2項目
@@ -458,14 +684,79 @@ test "buildItemList: expanded entry shows children" {
     try std.testing.expectEqualStrings("child1", list.items[1].entry.nameSlice());
 }
 
+test "buildItemList: deleted entry is skipped" {
+    const allocator = std.testing.allocator;
+    var children = [_]types.DirEntry{
+        makeEntry("a", 100, &.{}),
+        makeEntry("b", 200, &.{}),
+    };
+    const root = makeEntry(".", 300, &children);
+    var expanded = std.AutoHashMap(usize, void).init(allocator);
+    defer expanded.deinit();
+    var deleted = std.AutoHashMap(usize, void).init(allocator);
+    defer deleted.deinit();
+
+    // b を削除済みとしてマーク
+    try deleted.put(@intFromPtr(&children[1]), {});
+
+    var list: std.ArrayList(Item) = .{};
+    defer list.deinit(allocator);
+
+    for (root.children, 0..) |*child, i| {
+        if (deleted.contains(@intFromPtr(child))) continue;
+        try buildItemList(allocator, &list, child, 0, i == root.children.len - 1, &expanded, &deleted, .size);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), list.items.len);
+    try std.testing.expectEqualStrings("a", list.items[0].entry.nameSlice());
+}
+
+test "sortedChildIndices: size descending" {
+    const allocator = std.testing.allocator;
+    const children = [_]types.DirEntry{
+        makeEntry("small", 10, &.{}),
+        makeEntry("large", 100, &.{}),
+        makeEntry("mid", 50, &.{}),
+    };
+    const indices = try sortedChildIndices(allocator, &children, .size);
+    defer allocator.free(indices);
+
+    try std.testing.expectEqual(@as(usize, 1), indices[0]); // large
+    try std.testing.expectEqual(@as(usize, 2), indices[1]); // mid
+    try std.testing.expectEqual(@as(usize, 0), indices[2]); // small
+}
+
+test "sortedChildIndices: name ascending" {
+    const allocator = std.testing.allocator;
+    const children = [_]types.DirEntry{
+        makeEntry("c", 30, &.{}),
+        makeEntry("a", 10, &.{}),
+        makeEntry("b", 20, &.{}),
+    };
+    const indices = try sortedChildIndices(allocator, &children, .name);
+    defer allocator.free(indices);
+
+    try std.testing.expectEqualStrings("a", children[indices[0]].nameSlice());
+    try std.testing.expectEqualStrings("b", children[indices[1]].nameSlice());
+    try std.testing.expectEqualStrings("c", children[indices[2]].nameSlice());
+}
+
+test "SortMode: next cycles correctly" {
+    try std.testing.expectEqual(SortMode.name, SortMode.size.next());
+    try std.testing.expectEqual(SortMode.file_count, SortMode.name.next());
+    try std.testing.expectEqual(SortMode.size, SortMode.file_count.next());
+}
+
 test "State: init and currentRoot" {
     const allocator = std.testing.allocator;
     const root = makeEntry(".", 0, &.{});
-    var state = try State.init(allocator, &root);
+    var state = try State.init(allocator, &root, ".");
     defer state.deinit();
 
     try std.testing.expectEqualStrings(".", state.currentRoot().nameSlice());
     try std.testing.expectEqual(@as(usize, 0), state.cursor);
+    try std.testing.expectEqual(SortMode.size, state.sort_mode);
+    try std.testing.expect(!state.confirm_delete);
 }
 
 test "State: drill-down and back" {
@@ -474,7 +765,7 @@ test "State: drill-down and back" {
         makeEntry("sub", 100, &.{}),
     };
     const root = makeEntry(".", 100, &children);
-    var state = try State.init(allocator, &root);
+    var state = try State.init(allocator, &root, ".");
     defer state.deinit();
 
     // ドリルダウン
@@ -486,4 +777,23 @@ test "State: drill-down and back" {
     _ = state.root_stack.pop();
     try std.testing.expectEqualStrings(".", state.currentRoot().nameSlice());
     try std.testing.expectEqual(@as(usize, 1), state.root_stack.items.len);
+}
+
+test "State: buildCurrentPath with drill-down" {
+    const allocator = std.testing.allocator;
+    var children = [_]types.DirEntry{
+        makeEntry("subdir", 100, &.{}),
+    };
+    const root = makeEntry("myroot", 100, &children);
+    var state = try State.init(allocator, &root, "/base/path");
+    defer state.deinit();
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path0 = try state.buildCurrentPath(&buf);
+    try std.testing.expectEqualStrings("/base/path", path0);
+
+    // ドリルダウン後
+    try state.root_stack.append(allocator, &children[0]);
+    const path1 = try state.buildCurrentPath(&buf);
+    try std.testing.expectEqualStrings("/base/path/subdir", path1);
 }

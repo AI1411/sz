@@ -35,6 +35,8 @@ fn getDeviceId(fd: std.posix.fd_t) !posix.dev_t {
 /// Linux 専用の型と関数をまとめた名前空間。
 /// 非 Linux 環境ではコンパイルされない空の構造体になる。
 const linux_impl = if (builtin.os.tag == .linux) struct {
+    /// io_uring バッチサイズ: 1 サブミットで処理する最大 SQE 数
+    const IOURING_BATCH: u16 = 64;
     /// Linux dirent64 構造体 (getdents64 が返す形式)
     const LinuxDirent64 = extern struct {
         ino: u64,
@@ -212,6 +214,246 @@ const linux_impl = if (builtin.os.tag == .linux) struct {
             .depth = depth,
         };
     }
+
+    // ─── io_uring 最適化スキャン ──────────────────────────────────────────────
+
+    /// io_uring を使ってファイルの statx をバッチ発行し、ファイルサイズを一括取得する。
+    /// sizes[i] に names[i] のファイルサイズを書き込む。エラー時は sizes[i] = 0 のまま。
+    fn batchStatxFiles(
+        allocator: std.mem.Allocator,
+        ring: *std.os.linux.IoUring,
+        dir_fd: posix.fd_t,
+        names: []const [:0]const u8,
+        sizes: []u64,
+    ) !void {
+        if (names.len == 0) return;
+
+        // statx 結果バッファを一括確保 (カーネルが直接書き込む)
+        const statx_bufs = try allocator.alloc(std.os.linux.Statx, names.len);
+        defer allocator.free(statx_bufs);
+        @memset(sizes, 0);
+
+        var offset: usize = 0;
+        while (offset < names.len) {
+            const end = @min(offset + IOURING_BATCH, names.len);
+            const count = end - offset;
+
+            // SQE をキューに追加
+            for (offset..end) |i| {
+                _ = try ring.statx(
+                    @intCast(i), // user_data = グローバルインデックス
+                    dir_fd,
+                    names[i],
+                    std.os.linux.AT.NO_AUTOMOUNT,
+                    std.os.linux.STATX_SIZE,
+                    &statx_bufs[i],
+                );
+            }
+
+            // サブミットして完了を待つ
+            _ = try ring.submit_and_wait(@intCast(count));
+
+            // CQE を処理してサイズを収集
+            var cqes: [IOURING_BATCH]std.os.linux.io_uring_cqe = undefined;
+            const n_done = try ring.copy_cqes(cqes[0..count], 0);
+            for (cqes[0..n_done]) |cqe| {
+                if (cqe.err() == .SUCCESS) {
+                    const i: usize = @intCast(cqe.user_data);
+                    if (i < names.len) sizes[i] = statx_bufs[i].size;
+                }
+            }
+
+            offset = end;
+        }
+    }
+
+    /// io_uring を使ったディレクトリスキャン。
+    /// 通常ファイルの stat を io_uring でバッチ発行して高速化する。
+    fn scanDirIoUring(
+        allocator: std.mem.Allocator,
+        ring: *std.os.linux.IoUring,
+        dir: std.fs.Dir,
+        name: []const u8,
+        depth: u8,
+        root_dev: posix.dev_t,
+        options: ScanOptions,
+        visited: *std.AutoHashMap(InodeKey, void),
+    ) !types.DirEntry {
+        var total_size: u64 = 0;
+        var file_count: u32 = 0;
+        var dir_count: u32 = 0;
+        var children: std.ArrayList(types.DirEntry) = .{};
+
+        // 通常ファイル名を収集して io_uring でバッチ stat する
+        var file_names: std.ArrayList([:0]const u8) = .{};
+        defer {
+            for (file_names.items) |n| allocator.free(n);
+            file_names.deinit(allocator);
+        }
+
+        var buf: [32768]u8 align(8) = undefined;
+        while (true) {
+            const n = getdents64(dir.fd, &buf) catch break;
+            if (n == 0) break;
+
+            var off: usize = 0;
+            while (off < n) {
+                const de: *LinuxDirent64 = @ptrCast(@alignCast(&buf[off]));
+                defer off += de.reclen;
+
+                const name_ptr: [*:0]const u8 = @ptrCast(&buf[off + @offsetOf(LinuxDirent64, "name")]);
+                const entry_name = std.mem.span(name_ptr);
+
+                if (std.mem.eql(u8, entry_name, ".") or std.mem.eql(u8, entry_name, "..")) continue;
+
+                var kind = de.kind;
+                if (kind == DT_UNKNOWN) {
+                    const st = dir.statFile(entry_name) catch continue;
+                    kind = switch (st.kind) {
+                        .file => DT_REG,
+                        .directory => DT_DIR,
+                        .sym_link => DT_LNK,
+                        else => DT_UNKNOWN,
+                    };
+                }
+
+                switch (kind) {
+                    DT_REG => {
+                        // ファイル名をコピーして後でバッチ stat
+                        const name_copy = try allocator.dupeZ(u8, entry_name);
+                        try file_names.append(allocator, name_copy);
+                        file_count += 1;
+                    },
+                    DT_LNK => {
+                        if (!options.follow_symlinks) continue;
+                        const st = dir.statFile(entry_name) catch continue;
+                        switch (st.kind) {
+                            .file => {
+                                total_size += st.size;
+                                file_count += 1;
+                            },
+                            .directory => {
+                                var child_dir = dir.openDir(entry_name, .{
+                                    .iterate = true,
+                                    .no_follow = false,
+                                }) catch continue;
+                                defer child_dir.close();
+
+                                if (!options.cross_mount) {
+                                    const child_dev = getDeviceId(child_dir.fd) catch continue;
+                                    if (child_dev != root_dev) continue;
+                                }
+
+                                const child_stat = posix.fstat(child_dir.fd) catch continue;
+                                const key = inodeKey(child_stat.dev, child_stat.ino);
+                                if (visited.contains(key)) {
+                                    std.fs.File.stderr().writeAll("sz: warning: symlink loop detected\n") catch {};
+                                    continue;
+                                }
+                                try visited.put(key, {});
+
+                                dir_count += 1;
+                                const next_depth: u8 = if (depth < 255) depth + 1 else 255;
+                                const child = try scanDirIoUring(allocator, ring, child_dir, entry_name, next_depth, root_dev, options, visited);
+                                total_size += child.total_size;
+                                file_count += child.file_count;
+                                dir_count += child.dir_count;
+                                try children.append(allocator, child);
+                            },
+                            else => {},
+                        }
+                    },
+                    DT_DIR => {
+                        var child_dir = dir.openDir(entry_name, .{
+                            .iterate = true,
+                            .no_follow = true,
+                        }) catch |err| switch (err) {
+                            error.AccessDenied => {
+                                var warn_buf: [512]u8 = undefined;
+                                const warn_msg = std.fmt.bufPrint(
+                                    &warn_buf,
+                                    "sz: warning: cannot access '{s}': permission denied\n",
+                                    .{entry_name},
+                                ) catch "sz: warning: permission denied\n";
+                                std.fs.File.stderr().writeAll(warn_msg) catch {};
+                                continue;
+                            },
+                            else => continue,
+                        };
+                        defer child_dir.close();
+
+                        if (!options.cross_mount) {
+                            const child_dev = getDeviceId(child_dir.fd) catch continue;
+                            if (child_dev != root_dev) continue;
+                        }
+
+                        dir_count += 1;
+                        const next_depth: u8 = if (depth < 255) depth + 1 else 255;
+                        const child = try scanDirIoUring(allocator, ring, child_dir, entry_name, next_depth, root_dev, options, visited);
+                        total_size += child.total_size;
+                        file_count += child.file_count;
+                        dir_count += child.dir_count;
+                        try children.append(allocator, child);
+                    },
+                    else => {},
+                }
+            }
+        }
+
+        // 収集したファイル名を io_uring でバッチ stat
+        if (file_names.items.len > 0) {
+            const sizes = try allocator.alloc(u64, file_names.items.len);
+            defer allocator.free(sizes);
+            batchStatxFiles(allocator, ring, dir.fd, file_names.items, sizes) catch {
+                // io_uring 失敗時は通常 stat にフォールバック
+                for (file_names.items, sizes) |fname, *sz| {
+                    const st = dir.statFile(fname) catch continue;
+                    sz.* = st.size;
+                }
+            };
+            for (sizes) |sz| total_size += sz;
+        }
+
+        std.sort.block(types.DirEntry, children.items, {}, struct {
+            fn desc(_: void, a: types.DirEntry, b: types.DirEntry) bool {
+                return a.total_size > b.total_size;
+            }
+        }.desc);
+
+        const name_copy = try allocator.dupe(u8, name);
+        return types.DirEntry{
+            .name = name_copy.ptr,
+            .name_len = @intCast(name_copy.len),
+            .total_size = total_size,
+            .file_count = file_count,
+            .dir_count = dir_count,
+            .children = try children.toOwnedSlice(allocator),
+            .depth = depth,
+        };
+    }
+
+    /// Linux 用スキャンエントリポイント。
+    /// io_uring が使用可能であれば scanDirIoUring を、そうでなければ scanDir を使う。
+    fn scanLinux(
+        allocator: std.mem.Allocator,
+        dir: std.fs.Dir,
+        name: []const u8,
+        depth: u8,
+        root_dev: posix.dev_t,
+        options: ScanOptions,
+        visited: *std.AutoHashMap(InodeKey, void),
+    ) !types.DirEntry {
+        // io_uring の初期化を試みる
+        var ring = std.os.linux.IoUring.init(IOURING_BATCH, 0) catch {
+            // カーネルが io_uring 非対応 → getdents64 にフォールバック
+            return scanDir(allocator, dir, name, depth, root_dev, options, visited);
+        };
+        defer ring.deinit();
+
+        // io_uring スキャン (失敗時は getdents64 にフォールバック)
+        return scanDirIoUring(allocator, &ring, dir, name, depth, root_dev, options, visited) catch
+            scanDir(allocator, dir, name, depth, root_dev, options, visited);
+    }
 } else struct {};
 
 // ─── POSIX フォールバック (非 Linux 環境用) ──────────────────────────────────
@@ -362,7 +604,7 @@ pub fn scan(
     try visited.put(inodeKey(root_stat.dev, root_stat.ino), {});
 
     const root = if (builtin.os.tag == .linux)
-        try linux_impl.scanDir(allocator, root_dir, root_name, 0, root_dev, options, &visited)
+        try linux_impl.scanLinux(allocator, root_dir, root_name, 0, root_dev, options, &visited)
     else
         try scanDirPosix(allocator, root_dir, root_name, 0, root_dev, options, &visited);
 
