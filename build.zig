@@ -134,6 +134,45 @@ pub fn build(b: *std.Build) void {
     const tree_tests = b.addTest(.{ .root_module = tree_test_mod });
     const run_tree_tests = b.addRunArtifact(tree_tests);
 
+    // render/flat.zig テスト (types, size_fmt named imports が必要)
+    const flat_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/render/flat.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    flat_test_mod.addImport("types", types_mod);
+    flat_test_mod.addImport("size_fmt", size_fmt_mod);
+    const flat_tests = b.addTest(.{ .root_module = flat_test_mod });
+    const run_flat_tests = b.addRunArtifact(flat_tests);
+
+    // filter/pattern.zig テスト
+    const filter_pattern_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/filter/pattern.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const filter_pattern_tests = b.addTest(.{ .root_module = filter_pattern_test_mod });
+    const run_filter_pattern_tests = b.addRunArtifact(filter_pattern_tests);
+
+    // filter/size.zig テスト
+    const filter_size_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/filter/size.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const filter_size_tests = b.addTest(.{ .root_module = filter_size_test_mod });
+    const run_filter_size_tests = b.addRunArtifact(filter_size_tests);
+
+    // filter/preset.zig テスト
+    const filter_preset_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/filter/preset.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const filter_preset_tests = b.addTest(.{ .root_module = filter_preset_test_mod });
+    const run_filter_preset_tests = b.addRunArtifact(filter_preset_tests);
+
+
     // scanner/queue.zig テスト
     const scanner_queue_test_mod = b.createModule(.{
         .root_source_file = b.path("src/scanner/queue.zig"),
@@ -188,4 +227,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_ansi_tests.step);
     test_step.dependOn(&run_bar_tests.step);
     test_step.dependOn(&run_tree_tests.step);
+    test_step.dependOn(&run_flat_tests.step);
+    test_step.dependOn(&run_filter_pattern_tests.step);
+    test_step.dependOn(&run_filter_size_tests.step);
+    test_step.dependOn(&run_filter_preset_tests.step);
 }
