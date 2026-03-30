@@ -38,6 +38,19 @@ pub fn build(b: *std.Build) void {
 
     const run_unit_tests = b.addRunArtifact(unit_tests);
 
+    const args_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/utils/args.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const args_tests = b.addTest(.{
+        .root_module = args_test_mod,
+    });
+
+    const run_args_tests = b.addRunArtifact(args_tests);
+
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
+    test_step.dependOn(&run_args_tests.step);
 }
