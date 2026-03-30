@@ -25,6 +25,12 @@ pub const Args = struct {
     max_size_str: ?[]const u8,
     /// --preset
     preset: ?Preset,
+    /// --json: JSON 形式で stdout へ出力
+    json: bool,
+    /// --csv: CSV 形式で stdout へ出力
+    csv: bool,
+    /// --save <path>: スキャン結果を JSON スナップショットとして保存
+    save_path: ?[]const u8,
     /// --exclude パターンバッファ
     exclude_buf: [MAX_PATTERNS][]const u8,
     exclude_count: u8,
@@ -76,6 +82,9 @@ fn parseCore(argv: []const []const u8) !Args {
     var min_size_str: ?[]const u8 = null;
     var max_size_str: ?[]const u8 = null;
     var preset: ?Preset = null;
+    var json: bool = false;
+    var csv: bool = false;
+    var save_path: ?[]const u8 = null;
     var exclude_buf: [MAX_PATTERNS][]const u8 = undefined;
     var exclude_count: u8 = 0;
     var only_buf: [MAX_PATTERNS][]const u8 = undefined;
@@ -160,6 +169,17 @@ fn parseCore(argv: []const []const u8) !Args {
                 std.debug.print("error: unknown preset '{s}' (available: dev, media, logs)\n", .{p_name});
                 return error.InvalidArgument;
             }
+        } else if (std.mem.eql(u8, arg, "--json")) {
+            json = true;
+        } else if (std.mem.eql(u8, arg, "--csv")) {
+            csv = true;
+        } else if (std.mem.eql(u8, arg, "--save")) {
+            i += 1;
+            if (i >= argv.len) {
+                std.debug.print("error: {s} requires a file path argument\n", .{arg});
+                return error.InvalidArgument;
+            }
+            save_path = argv[i];
         } else if (std.mem.eql(u8, arg, "--flat")) {
             flat = true;
         } else if (std.mem.eql(u8, arg, "-L") or std.mem.eql(u8, arg, "--follow-links")) {
@@ -196,6 +216,9 @@ fn parseCore(argv: []const []const u8) !Args {
         .min_size_str = min_size_str,
         .max_size_str = max_size_str,
         .preset = preset,
+        .json = json,
+        .csv = csv,
+        .save_path = save_path,
         .exclude_buf = exclude_buf,
         .exclude_count = exclude_count,
         .only_buf = only_buf,
@@ -231,6 +254,9 @@ pub fn parse(allocator: std.mem.Allocator) !Args {
     if (result.max_size_str) |s| {
         result.max_size_str = try allocator.dupe(u8, s);
     }
+    if (result.save_path) |s| {
+        result.save_path = try allocator.dupe(u8, s);
+    }
     return result;
 }
 
@@ -253,6 +279,9 @@ test "default args" {
     try std.testing.expect(parsed.min_size_str == null);
     try std.testing.expect(parsed.max_size_str == null);
     try std.testing.expect(parsed.preset == null);
+    try std.testing.expect(!parsed.json);
+    try std.testing.expect(!parsed.csv);
+    try std.testing.expect(parsed.save_path == null);
     try std.testing.expectEqual(@as(u8, 0), parsed.exclude_count);
     try std.testing.expectEqual(@as(u8, 0), parsed.only_count);
 }
@@ -405,4 +434,25 @@ test "default args: help and version are false" {
     const parsed = try parseSlice(&.{});
     try std.testing.expect(!parsed.help);
     try std.testing.expect(!parsed.version);
+}
+
+test "parse --json sets json flag" {
+    const parsed = try parseSlice(&.{"--json"});
+    try std.testing.expect(parsed.json);
+    try std.testing.expect(!parsed.csv);
+}
+
+test "parse --csv sets csv flag" {
+    const parsed = try parseSlice(&.{"--csv"});
+    try std.testing.expect(parsed.csv);
+    try std.testing.expect(!parsed.json);
+}
+
+test "parse --save sets save_path" {
+    const parsed = try parseSlice(&.{ "--save", "snapshot.json" });
+    try std.testing.expectEqualStrings("snapshot.json", parsed.save_path.?);
+}
+
+test "parse --save missing path returns error" {
+    try std.testing.expectError(error.InvalidArgument, parseSlice(&.{"--save"}));
 }

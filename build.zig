@@ -172,6 +172,83 @@ pub fn build(b: *std.Build) void {
     const filter_preset_tests = b.addTest(.{ .root_module = filter_preset_test_mod });
     const run_filter_preset_tests = b.addRunArtifact(filter_preset_tests);
 
+    // filter/date.zig テスト
+    const filter_date_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/filter/date.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const filter_date_tests = b.addTest(.{ .root_module = filter_date_test_mod });
+    const run_filter_date_tests = b.addRunArtifact(filter_date_tests);
+
+    // tests/filter_test.zig 統合テスト
+    const filter_pattern_mod = b.createModule(.{
+        .root_source_file = b.path("src/filter/pattern.zig"),
+    });
+    const filter_size_mod = b.createModule(.{
+        .root_source_file = b.path("src/filter/size.zig"),
+    });
+    const filter_preset_mod = b.createModule(.{
+        .root_source_file = b.path("src/filter/preset.zig"),
+    });
+    const filter_date_mod = b.createModule(.{
+        .root_source_file = b.path("src/filter/date.zig"),
+    });
+    const filter_integration_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/filter_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    filter_integration_test_mod.addImport("filter_pattern", filter_pattern_mod);
+    filter_integration_test_mod.addImport("filter_size", filter_size_mod);
+    filter_integration_test_mod.addImport("filter_preset", filter_preset_mod);
+    filter_integration_test_mod.addImport("filter_date", filter_date_mod);
+    const filter_integration_tests = b.addTest(.{ .root_module = filter_integration_test_mod });
+    const run_filter_integration_tests = b.addRunArtifact(filter_integration_tests);
+
+    // export/json.zig テスト (types named import が必要)
+    const export_json_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/export/json.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    export_json_test_mod.addImport("types", types_mod);
+    const export_json_tests = b.addTest(.{ .root_module = export_json_test_mod });
+    const run_export_json_tests = b.addRunArtifact(export_json_tests);
+
+    // export/csv.zig テスト (types named import が必要)
+    const export_csv_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/export/csv.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    export_csv_test_mod.addImport("types", types_mod);
+    const export_csv_tests = b.addTest(.{ .root_module = export_csv_test_mod });
+    const run_export_csv_tests = b.addRunArtifact(export_csv_tests);
+
+    // export/snapshot.zig テスト (types named import が必要; json.zig はファイル相対インポート)
+    const export_snapshot_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/export/snapshot.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    export_snapshot_test_mod.addImport("types", types_mod);
+    const export_snapshot_tests = b.addTest(.{ .root_module = export_snapshot_test_mod });
+    const run_export_snapshot_tests = b.addRunArtifact(export_snapshot_tests);
+
+    // tests/bench_test.zig ベンチマークテスト (scanner named import が必要)
+    const scanner_parallel_mod = b.createModule(.{
+        .root_source_file = b.path("src/scanner/parallel.zig"),
+    });
+    scanner_parallel_mod.addImport("types", types_mod);
+    const bench_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/bench_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    bench_test_mod.addImport("scanner", scanner_parallel_mod);
+    const bench_tests = b.addTest(.{ .root_module = bench_test_mod });
+    const run_bench_tests = b.addRunArtifact(bench_tests);
 
     // scanner/queue.zig テスト
     const scanner_queue_test_mod = b.createModule(.{
@@ -231,4 +308,13 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_filter_pattern_tests.step);
     test_step.dependOn(&run_filter_size_tests.step);
     test_step.dependOn(&run_filter_preset_tests.step);
+    test_step.dependOn(&run_filter_date_tests.step);
+    test_step.dependOn(&run_filter_integration_tests.step);
+    test_step.dependOn(&run_export_json_tests.step);
+    test_step.dependOn(&run_export_csv_tests.step);
+    test_step.dependOn(&run_export_snapshot_tests.step);
+
+    // ─── ベンチマーク ─────────────────────────────────────────────────────────
+    const bench_step = b.step("bench", "Run benchmark tests");
+    bench_step.dependOn(&run_bench_tests.step);
 }
