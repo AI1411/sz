@@ -4,6 +4,7 @@ const scanner = @import("scanner/parallel.zig");
 const tree = @import("render/tree.zig");
 const flat = @import("render/flat.zig");
 const compare_render = @import("render/compare.zig");
+const tui = @import("render/tui.zig");
 const size_fmt = @import("size_fmt");
 const types = @import("types");
 const pattern_filter = @import("filter/pattern.zig");
@@ -44,6 +45,8 @@ const help_text =
     \\      --older <Nd>       Show only entries older than N days (e.g. 30d)
     \\      --assert-max <SZ>  Exit 1 if total size exceeds SIZE (e.g. 500MB)
     \\      --compare <PATH>   Compare with saved JSON snapshot
+    \\  -1, --one-level        Show only one level deep (equiv. to --depth 1)
+    \\  -i, --interactive      Launch interactive TUI mode
     \\  -h, --help             Show this help message
     \\  -V, --version          Show version
     \\
@@ -69,6 +72,11 @@ pub fn main() !void {
     if (parsed.version) {
         try std.fs.File.stdout().writeAll("sz " ++ version_str ++ "\n");
         return;
+    }
+
+    // -1 / --one-level: depth を 1 に強制
+    if (parsed.one_level) {
+        parsed.depth = 1;
     }
 
     // --preset をパターンバッファに展開する
@@ -202,6 +210,12 @@ pub fn main() !void {
             .root_path = parsed.path,
         });
         try std.fs.File.stdout().writeAll(out.items);
+        return;
+    }
+
+    // -i / --interactive: TUIモード
+    if (parsed.interactive) {
+        try tui.run(allocator, &filtered_root);
         return;
     }
 

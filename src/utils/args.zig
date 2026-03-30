@@ -39,6 +39,10 @@ pub const Args = struct {
     assert_max_str: ?[]const u8,
     /// --compare <path>: 保存済みスナップショットと比較表示
     compare_path: ?[]const u8,
+    /// -1, --one-level: 1階層のみ表示（du -sh * 相当、--depth 1 と同等）
+    one_level: bool,
+    /// -i, --interactive: TUIモードで起動
+    interactive: bool,
     /// --exclude パターンバッファ
     exclude_buf: [MAX_PATTERNS][]const u8,
     exclude_count: u8,
@@ -97,6 +101,8 @@ fn parseCore(argv: []const []const u8) !Args {
     var older_str: ?[]const u8 = null;
     var assert_max_str: ?[]const u8 = null;
     var compare_path: ?[]const u8 = null;
+    var one_level: bool = false;
+    var interactive: bool = false;
     var exclude_buf: [MAX_PATTERNS][]const u8 = undefined;
     var exclude_count: u8 = 0;
     var only_buf: [MAX_PATTERNS][]const u8 = undefined;
@@ -215,6 +221,10 @@ fn parseCore(argv: []const []const u8) !Args {
                 return error.InvalidArgument;
             }
             compare_path = argv[i];
+        } else if (std.mem.eql(u8, arg, "-1") or std.mem.eql(u8, arg, "--one-level")) {
+            one_level = true;
+        } else if (std.mem.eql(u8, arg, "-i") or std.mem.eql(u8, arg, "--interactive")) {
+            interactive = true;
         } else if (std.mem.eql(u8, arg, "--flat")) {
             flat = true;
         } else if (std.mem.eql(u8, arg, "-L") or std.mem.eql(u8, arg, "--follow-links")) {
@@ -258,6 +268,8 @@ fn parseCore(argv: []const []const u8) !Args {
         .older_str = older_str,
         .assert_max_str = assert_max_str,
         .compare_path = compare_path,
+        .one_level = one_level,
+        .interactive = interactive,
         .exclude_buf = exclude_buf,
         .exclude_count = exclude_count,
         .only_buf = only_buf,
@@ -334,6 +346,8 @@ test "default args" {
     try std.testing.expect(parsed.older_str == null);
     try std.testing.expect(parsed.assert_max_str == null);
     try std.testing.expect(parsed.compare_path == null);
+    try std.testing.expect(!parsed.one_level);
+    try std.testing.expect(!parsed.interactive);
     try std.testing.expectEqual(@as(u8, 0), parsed.exclude_count);
     try std.testing.expectEqual(@as(u8, 0), parsed.only_count);
 }
@@ -539,4 +553,24 @@ test "parse --compare sets compare_path" {
 
 test "parse --compare missing path returns error" {
     try std.testing.expectError(error.InvalidArgument, parseSlice(&.{"--compare"}));
+}
+
+test "parse -1 sets one_level flag" {
+    const parsed = try parseSlice(&.{"-1"});
+    try std.testing.expect(parsed.one_level);
+}
+
+test "parse --one-level sets one_level flag" {
+    const parsed = try parseSlice(&.{"--one-level"});
+    try std.testing.expect(parsed.one_level);
+}
+
+test "parse -i sets interactive flag" {
+    const parsed = try parseSlice(&.{"-i"});
+    try std.testing.expect(parsed.interactive);
+}
+
+test "parse --interactive sets interactive flag" {
+    const parsed = try parseSlice(&.{"--interactive"});
+    try std.testing.expect(parsed.interactive);
 }
