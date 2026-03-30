@@ -50,7 +50,20 @@ pub fn build(b: *std.Build) void {
 
     const run_args_tests = b.addRunArtifact(args_tests);
 
+    const scanner_types_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/scanner/types.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const scanner_types_tests = b.addTest(.{
+        .root_module = scanner_types_test_mod,
+    });
+
+    const run_scanner_types_tests = b.addRunArtifact(scanner_types_tests);
+
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
     test_step.dependOn(&run_args_tests.step);
+    test_step.dependOn(&run_scanner_types_tests.step);
 }
