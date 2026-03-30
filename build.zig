@@ -181,6 +181,17 @@ pub fn build(b: *std.Build) void {
     const compare_tests = b.addTest(.{ .root_module = compare_test_mod });
     const run_compare_tests = b.addRunArtifact(compare_tests);
 
+    // render/tui.zig テスト (types, size_fmt named imports が必要)
+    const tui_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/render/tui.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    tui_test_mod.addImport("types", types_mod);
+    tui_test_mod.addImport("size_fmt", size_fmt_mod);
+    const tui_tests = b.addTest(.{ .root_module = tui_test_mod });
+    const run_tui_tests = b.addRunArtifact(tui_tests);
+
     // filter/pattern.zig テスト
     const filter_pattern_test_mod = b.createModule(.{
         .root_source_file = b.path("src/filter/pattern.zig"),
@@ -361,6 +372,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_export_csv_tests.step);
     test_step.dependOn(&run_export_snapshot_tests.step);
     test_step.dependOn(&run_compare_tests.step);
+    test_step.dependOn(&run_tui_tests.step);
 
     // ─── ベンチマーク ─────────────────────────────────────────────────────────
     const bench_step = b.step("bench", "Run benchmark tests");
