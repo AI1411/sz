@@ -75,10 +75,10 @@ pub fn parse(allocator: std.mem.Allocator) !Args {
 
     var result = try parseCore(rest);
 
-    // Duplicate path so it survives after argv is freed.
-    if (!std.mem.eql(u8, result.path, default_path)) {
-        result.path = try allocator.dupe(u8, result.path);
-    }
+    // argv is freed by the defer above; always dupe path so it outlives argv.
+    // Note: even if path equals default_path in content, it may point into
+    // argv rather than the static literal, so the condition-based skip is unsafe.
+    result.path = try allocator.dupe(u8, result.path);
     return result;
 }
 

@@ -62,8 +62,21 @@ pub fn build(b: *std.Build) void {
 
     const run_scanner_types_tests = b.addRunArtifact(scanner_types_tests);
 
+    const scanner_posix_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/scanner/posix.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const scanner_posix_tests = b.addTest(.{
+        .root_module = scanner_posix_test_mod,
+    });
+
+    const run_scanner_posix_tests = b.addRunArtifact(scanner_posix_tests);
+
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
     test_step.dependOn(&run_args_tests.step);
     test_step.dependOn(&run_scanner_types_tests.step);
+    test_step.dependOn(&run_scanner_posix_tests.step);
 }
