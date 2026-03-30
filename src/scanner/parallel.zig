@@ -158,6 +158,7 @@ pub fn scan(
 
     // DirEntry ツリーを構築
     const root_entry = try buildDirEntry(allocator, root_node);
+    const perm_errors = ctx.perm_errors.load(.monotonic);
 
     // ScanNode ツリーを解放
     freeScanNodes(allocator, root_node);
@@ -165,7 +166,7 @@ pub fn scan(
     allocator.free(root_node.name);
     allocator.destroy(root_node);
 
-    return types.ScanResult{ .root = root_entry };
+    return types.ScanResult{ .root = root_entry, .perm_errors = perm_errors };
 }
 
 // ─── tests ───────────────────────────────────────────────────────────────────
@@ -334,4 +335,30 @@ test "scan: permission denied directory is skipped" {
 
     try std.testing.expectEqual(@as(u32, 1), result.root.file_count);
     try std.testing.expectEqual(@as(u64, 2), result.root.total_size);
+}
+
+test "scan: perm_errors incremented for permission denied directory" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    {
+        const f = try tmp.dir.createFile("visible.txt", .{});
+        defer f.close();
+        try f.writeAll("ok");
+    }
+    try tmp.dir.makeDir("noaccess");
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const dir_path = try tmp.dir.realpath("noaccess", &path_buf);
+    try std.posix.fchmodat(std.posix.AT.FDCWD, dir_path, 0o000, 0);
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const root_path = try tmp.dir.realpath(".", &path_buf);
+    const result = try scan(arena.allocator(), root_path, .{ .apparent = true });
+
+    try std.posix.fchmodat(std.posix.AT.FDCWD, dir_path, 0o755, 0);
+
+    try std.testing.expectEqual(@as(u32, 1), result.perm_errors);
 }

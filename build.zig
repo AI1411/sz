@@ -304,6 +304,10 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     bench_test_mod.addImport("scanner", scanner_parallel_mod);
+    const args_bench_mod = b.createModule(.{
+        .root_source_file = b.path("src/utils/args.zig"),
+    });
+    bench_test_mod.addImport("args", args_bench_mod);
     const bench_tests = b.addTest(.{ .root_module = bench_test_mod });
     const run_bench_tests = b.addRunArtifact(bench_tests);
 

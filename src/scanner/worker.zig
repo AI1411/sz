@@ -55,6 +55,8 @@ pub const WorkerContext = struct {
     cross_mount: bool,
     /// true = ファイルサイズ(st_size)を使用、false = ディスク使用量(st_blocks × 512)
     apparent: bool = false,
+    /// 権限エラー発生ディレクトリ数 (atomic: 複数スレッドから加算)
+    perm_errors: std.atomic.Value(u32) = .{ .raw = 0 },
 };
 
 fn getDeviceId(dir: std.fs.Dir) !posix.dev_t {
@@ -101,7 +103,21 @@ fn processDir(ctx: *WorkerContext, item: queue_mod.WorkItem) !void {
     var dir = std.fs.openDirAbsolute(item.path, .{
         .iterate = true,
         .no_follow = true,
-    }) catch return;
+    }) catch |err| switch (err) {
+        error.AccessDenied => {
+            var warn_buf: [512]u8 = undefined;
+            const name = std.fs.path.basename(item.path);
+            const warn_msg = std.fmt.bufPrint(
+                &warn_buf,
+                "sz: warning: cannot access '{s}': permission denied\n",
+                .{name},
+            ) catch "sz: warning: permission denied\n";
+            std.fs.File.stderr().writeAll(warn_msg) catch {};
+            _ = ctx.perm_errors.fetchAdd(1, .monotonic);
+            return;
+        },
+        else => return,
+    };
     defer dir.close();
 
     const dir_dev = getDeviceId(dir) catch return;

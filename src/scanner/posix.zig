@@ -44,6 +44,7 @@ fn scanDirRecursive(
     root_dev: posix.dev_t,
     options: ScanOptions,
     visited: *std.AutoHashMap(InodeKey, void),
+    perm_errors: *u32,
 ) !types.DirEntry {
     var total_size: u64 = 0;
     var file_count: u32 = 0;
@@ -108,7 +109,7 @@ fn scanDirRecursive(
 
                         dir_count += 1;
                         const next_depth: u8 = if (depth < 255) depth + 1 else 255;
-                        const child = try scanDirRecursive(allocator, child_dir, entry.name, next_depth, root_dev, options, visited);
+                        const child = try scanDirRecursive(allocator, child_dir, entry.name, next_depth, root_dev, options, visited, perm_errors);
                         total_size += child.total_size;
                         file_count += child.file_count;
                         dir_count += child.dir_count;
@@ -130,6 +131,7 @@ fn scanDirRecursive(
                             .{entry.name},
                         ) catch "sz: warning: permission denied\n";
                         std.fs.File.stderr().writeAll(warn_msg) catch {};
+                        perm_errors.* += 1;
                         continue;
                     },
                     else => continue,
@@ -144,7 +146,7 @@ fn scanDirRecursive(
 
                 dir_count += 1;
                 const next_depth: u8 = if (depth < 255) depth + 1 else 255;
-                const child = try scanDirRecursive(allocator, child_dir, entry.name, next_depth, root_dev, options, visited);
+                const child = try scanDirRecursive(allocator, child_dir, entry.name, next_depth, root_dev, options, visited, perm_errors);
                 total_size += child.total_size;
                 file_count += child.file_count;
                 dir_count += child.dir_count;
@@ -203,6 +205,7 @@ pub fn scan(
     defer visited.deinit();
     try visited.put(inodeKey(root_stat.dev, root_stat.ino), {});
 
+    var perm_errors: u32 = 0;
     const root = try scanDirRecursive(
         allocator,
         root_dir,
@@ -211,9 +214,10 @@ pub fn scan(
         root_dev,
         options,
         &visited,
+        &perm_errors,
     );
 
-    return types.ScanResult{ .root = root };
+    return types.ScanResult{ .root = root, .perm_errors = perm_errors };
 }
 
 // ─── tests ───────────────────────────────────────────────────────────────────

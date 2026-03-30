@@ -25,6 +25,8 @@ pub const DirEntry = struct {
 /// メモリ管理は呼び出し側の ArenaAllocator で行う（arena.deinit() で一括解放）。
 pub const ScanResult = struct {
     root: DirEntry,
+    /// 権限エラー（EACCES/EPERM）が発生したディレクトリの数。
+    perm_errors: u32 = 0,
 };
 
 test "DirEntry nameSlice" {
