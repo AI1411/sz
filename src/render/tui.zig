@@ -446,10 +446,15 @@ fn getTerminalRows() usize {
         ws_ypixel: u16,
     };
     var ws: winsize_t = undefined;
-    const TIOCGWINSZ: u32 = 0x40087468; // macOS/Darwin
-    const ret = std.c.ioctl(STDOUT_FD, TIOCGWINSZ, &ws);
-    if (ret == 0 and ws.ws_row > 0) {
-        return ws.ws_row;
+    const builtin = @import("builtin");
+    if (comptime builtin.os.tag == .linux) {
+        // Linux: TIOCGWINSZ = 0x5413、直接 syscall を使用 (libc 不要)
+        const ret = std.os.linux.ioctl(STDOUT_FD, 0x5413, @intFromPtr(&ws));
+        if (ret == 0 and ws.ws_row > 0) return ws.ws_row;
+    } else {
+        // macOS/Darwin: TIOCGWINSZ = 0x40087468
+        const ret = std.c.ioctl(STDOUT_FD, @as(u32, 0x40087468), &ws);
+        if (ret == 0 and ws.ws_row > 0) return ws.ws_row;
     }
     return 24;
 }
@@ -777,6 +782,11 @@ test "State: drill-down and back" {
     _ = state.root_stack.pop();
     try std.testing.expectEqualStrings(".", state.currentRoot().nameSlice());
     try std.testing.expectEqual(@as(usize, 1), state.root_stack.items.len);
+}
+
+test "getTerminalRows: returns positive row count" {
+    const rows = getTerminalRows();
+    try std.testing.expect(rows > 0);
 }
 
 test "State: buildCurrentPath with drill-down" {
