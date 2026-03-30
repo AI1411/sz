@@ -64,9 +64,16 @@ fn getDeviceId(dir: std.fs.Dir) !posix.dev_t {
 
 /// プラットフォーム非依存で posix.Stat から mtime (秒) を取得する。
 fn getStatMtime(stat: posix.Stat) i64 {
-    // Linux: stat.mtim.tv_sec / macOS: stat.mtimespec.sec
+    // Linux: stat.mtim (timespec フィールド名は x86_64=tv_sec / aarch64=sec)
+    // macOS: stat.mtimespec.sec
     if (comptime @hasField(posix.Stat, "mtim")) {
-        return @intCast(stat.mtim.tv_sec);
+        const mtim = stat.mtim;
+        const T = @TypeOf(mtim);
+        if (comptime @hasField(T, "tv_sec")) {
+            return @intCast(mtim.tv_sec);
+        } else if (comptime @hasField(T, "sec")) {
+            return @intCast(mtim.sec);
+        }
     } else if (comptime @hasField(posix.Stat, "mtimespec")) {
         return @intCast(stat.mtimespec.sec);
     }
@@ -266,4 +273,12 @@ test "worker: subdirs are enqueued" {
         allocator.destroy(child);
     }
     root_node.children.deinit(allocator);
+}
+
+test "getStatMtime: returns positive mtime from real directory" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const stat = try posix.fstat(tmp.dir.fd);
+    const mtime = getStatMtime(stat);
+    try std.testing.expect(mtime > 0);
 }
