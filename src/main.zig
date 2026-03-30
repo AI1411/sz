@@ -1,5 +1,6 @@
 const std = @import("std");
 const args = @import("utils/args.zig");
+const scanner = @import("scanner/posix.zig");
 
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -13,14 +14,10 @@ pub fn main() !void {
         }
     };
 
-    var buf: [4096]u8 = undefined;
-    const stdout = std.fs.File.stdout();
-    const line = try std.fmt.bufPrint(&buf, "path={s} depth={d} top={d}\n", .{
-        parsed.path,
-        parsed.depth,
-        parsed.top,
-    });
-    try stdout.writeAll(line);
+    const result = try scanner.scan(allocator, parsed.path, .{});
+    _ = result;
+    _ = parsed.depth;
+    _ = parsed.top;
 }
 
 test "main compiles" {
