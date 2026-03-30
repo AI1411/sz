@@ -14,6 +14,8 @@ pub const ScanOptions = struct {
     follow_symlinks: bool = false,
     /// マウントポイントを越えてスキャンするか（デフォルト: 越えない）
     cross_mount: bool = false,
+    /// 並列ワーカー数。null = CPU コア数（自動）
+    jobs: ?u32 = null,
 };
 
 fn sizeDescending(_: void, a: types.DirEntry, b: types.DirEntry) bool {
@@ -129,9 +131,11 @@ pub fn scan(
         .cross_mount = options.cross_mount,
     };
 
-    // CPUコア数に応じたスレッド数を決定（最低1スレッド）
-    const cpu_count = std.Thread.getCpuCount() catch 1;
-    const thread_count = @max(1, cpu_count);
+    // ワーカー数を決定: --jobs 指定があればその値、なければ CPU コア数（最低1スレッド）
+    const thread_count: usize = if (options.jobs) |j|
+        @max(1, @as(usize, j))
+    else
+        @max(1, std.Thread.getCpuCount() catch 1);
 
     // ワーカースレッドを起動
     const threads = try allocator.alloc(std.Thread, thread_count);
