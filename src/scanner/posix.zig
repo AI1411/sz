@@ -29,10 +29,49 @@ fn scanDirRecursive(
 
     var iter = dir.iterate();
     while (try iter.next()) |entry| {
-        switch (entry.kind) {
+        var kind = entry.kind;
+
+        // .unknown: d_type が返されないファイルシステム（NFS/FUSE など）のフォールバック。
+        // Dir.statFile はシンボリックリンクを追跡するため、リンク先の種別が返る。
+        if (kind == .unknown) {
+            const st = dir.statFile(entry.name) catch continue;
+            kind = st.kind;
+        }
+
+        switch (kind) {
             .sym_link => {
-                // シンボリックリンクはデフォルトで追跡しない
+                // デフォルトではシンボリックリンクを追跡しない
                 if (!options.follow_symlinks) continue;
+                // statFile はリンクを追跡して実体の情報を返す
+                const st = dir.statFile(entry.name) catch continue;
+                switch (st.kind) {
+                    .file => {
+                        total_size += st.size;
+                        file_count += 1;
+                    },
+                    .directory => {
+                        // シンボリックリンクを辿ってディレクトリを開く
+                        var child_dir = dir.openDir(entry.name, .{
+                            .iterate = true,
+                            .no_follow = false,
+                        }) catch continue;
+                        defer child_dir.close();
+
+                        if (!options.cross_mount) {
+                            const child_dev = getDeviceId(child_dir) catch continue;
+                            if (child_dev != root_dev) continue;
+                        }
+
+                        dir_count += 1;
+                        const next_depth: u8 = if (depth < 255) depth + 1 else 255;
+                        const child = try scanDirRecursive(allocator, child_dir, entry.name, next_depth, root_dev, options);
+                        total_size += child.total_size;
+                        file_count += child.file_count;
+                        dir_count += child.dir_count;
+                        try children.append(allocator, child);
+                    },
+                    else => {},
+                }
             },
             .directory => {
                 var child_dir = dir.openDir(entry.name, .{
@@ -60,24 +99,16 @@ fn scanDirRecursive(
                 }
 
                 dir_count += 1;
-
                 const next_depth: u8 = if (depth < 255) depth + 1 else 255;
-                const child = try scanDirRecursive(
-                    allocator,
-                    child_dir,
-                    entry.name,
-                    next_depth,
-                    root_dev,
-                    options,
-                );
+                const child = try scanDirRecursive(allocator, child_dir, entry.name, next_depth, root_dev, options);
                 total_size += child.total_size;
                 file_count += child.file_count;
                 dir_count += child.dir_count;
                 try children.append(allocator, child);
             },
             .file => {
-                const stat = dir.statFile(entry.name) catch continue;
-                total_size += stat.size;
+                const st = dir.statFile(entry.name) catch continue;
+                total_size += st.size;
                 file_count += 1;
             },
             else => {},
@@ -104,14 +135,16 @@ pub fn scan(
     path: []const u8,
     options: ScanOptions,
 ) !types.ScanResult {
-    var root_dir = if (std.fs.path.isAbsolute(path))
-        try std.fs.openDirAbsolute(path, .{ .iterate = true, .no_follow = true })
-    else
-        try std.fs.cwd().openDir(path, .{ .iterate = true, .no_follow = true });
+    // 相対パスは realpath で絶対化してから開く。
+    // cwd().openDir(".", .{ .no_follow = true }) は macOS で FileNotFound になるため。
+    var real_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const real_path = try std.fs.cwd().realpath(path, &real_buf);
+
+    var root_dir = try std.fs.openDirAbsolute(real_path, .{ .iterate = true, .no_follow = true });
     defer root_dir.close();
 
     const root_dev = try getDeviceId(root_dir);
-    const basename = std.fs.path.basename(path);
+    const basename = std.fs.path.basename(real_path);
     const root_name = if (basename.len == 0) "." else basename;
 
     const root = try scanDirRecursive(
@@ -132,19 +165,16 @@ test "scan: recursive scan and size aggregation" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    // file1.txt = 5 bytes
     {
         const f = try tmp.dir.createFile("file1.txt", .{});
         defer f.close();
         try f.writeAll("hello");
     }
-    // file2.txt = 10 bytes
     {
         const f = try tmp.dir.createFile("file2.txt", .{});
         defer f.close();
         try f.writeAll("0123456789");
     }
-    // subdir/file3.txt = 7 bytes
     try tmp.dir.makeDir("subdir");
     {
         var sub = try tmp.dir.openDir("subdir", .{});
@@ -180,7 +210,6 @@ test "scan: symlinks not followed by default" {
         defer f.close();
         try f.writeAll("data");
     }
-    // symlink pointing to real.txt
     try tmp.dir.symLink("real.txt", "link.txt", .{});
 
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -190,9 +219,36 @@ test "scan: symlinks not followed by default" {
     const path = try tmp.dir.realpath(".", &path_buf);
 
     const result = try scan(arena.allocator(), path, .{});
-    // symlink should not be counted
     try std.testing.expectEqual(@as(u32, 1), result.root.file_count);
     try std.testing.expectEqual(@as(u64, 4), result.root.total_size);
+}
+
+test "scan: follow_symlinks=true counts symlinked file" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    {
+        const f = try tmp.dir.createFile("real.txt", .{});
+        defer f.close();
+        try f.writeAll("12345"); // 5 bytes
+    }
+    try tmp.dir.symLink("real.txt", "link.txt", .{});
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try tmp.dir.realpath(".", &path_buf);
+
+    // follow_symlinks=false: only real.txt counted
+    const result_no = try scan(arena.allocator(), path, .{ .follow_symlinks = false });
+    try std.testing.expectEqual(@as(u32, 1), result_no.root.file_count);
+    try std.testing.expectEqual(@as(u64, 5), result_no.root.total_size);
+
+    // follow_symlinks=true: real.txt + link.txt (both point to same 5-byte content)
+    const result_yes = try scan(arena.allocator(), path, .{ .follow_symlinks = true });
+    try std.testing.expectEqual(@as(u32, 2), result_yes.root.file_count);
+    try std.testing.expectEqual(@as(u64, 10), result_yes.root.total_size);
 }
 
 test "scan: permission denied directory is skipped" {
@@ -213,7 +269,6 @@ test "scan: permission denied directory is skipped" {
         try f.writeAll("secret");
     }
 
-    // Remove read+execute permission from noaccess
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const dir_path = try tmp.dir.realpath("noaccess", &path_buf);
     try std.posix.fchmodat(std.posix.AT.FDCWD, dir_path, 0o000, 0);
@@ -224,10 +279,8 @@ test "scan: permission denied directory is skipped" {
     const root_path = try tmp.dir.realpath(".", &path_buf);
     const result = try scan(arena.allocator(), root_path, .{});
 
-    // Restore permissions for cleanup
     try std.posix.fchmodat(std.posix.AT.FDCWD, dir_path, 0o755, 0);
 
-    // noaccess dir is counted in dir_count, its contents are skipped
     try std.testing.expectEqual(@as(u32, 1), result.root.file_count);
     try std.testing.expectEqual(@as(u64, 2), result.root.total_size);
 }
