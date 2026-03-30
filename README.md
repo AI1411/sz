@@ -11,13 +11,18 @@
 - **エクスポート**: JSON / CSV 形式で出力、スナップショット比較
 - **Zig 製**: 単一バイナリで依存なし
 
-## インストール
+## Installation
 
-### 必要環境
+### Homebrew (macOS) — recommended
 
-- [Zig](https://ziglang.org/) 0.15 以上
+```sh
+brew tap AI1411/sz
+brew install sz
+```
 
-### ビルド
+### Build from source
+
+Requirements: [Zig](https://ziglang.org/) 0.15 or later
 
 ```sh
 git clone https://github.com/AI1411/sz.git
@@ -25,10 +30,10 @@ cd sz
 zig build -Doptimize=ReleaseFast
 ```
 
-ビルドされたバイナリは `zig-out/bin/sz` に生成されます。
+The binary is generated at `zig-out/bin/sz`.
 
 ```sh
-# PATH に追加 (任意)
+# Optionally add to PATH
 cp zig-out/bin/sz ~/.local/bin/
 ```
 
