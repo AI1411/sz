@@ -16,17 +16,10 @@
 
 | トリガー | エージェント (`subagent_type`) | 必須 |
 |---------|-------------------------------|------|
-| バックエンドコード調査（3+ファイル） | `backend-explorer` | - |
-| フロントエンドコード調査（3+ファイル） | `frontend-explorer` | - |
-| Go コード実装完了 | `backend-code-reviewer` | **必須** |
-| React コード実装完了 | `frontend-quality-manager` | **必須** |
-| Go テスト実行・カバレッジ | `backend-test-runner` | - |
-| React テスト実行・カバレッジ | `frontend-test-runner` | - |
-| Go 包括的品質検証 | `backend-quality-manager` | - |
-| 要件書ドラフト完了 | `spec-requirements-validator` | **必須** |
-| 設計書ドラフト完了 | `spec-design-validator` | **必須** |
-| タスク分解完了 | `spec-task-validator` | **必須** |
-| タスク実装 | `spec-task-executor` | - |
+| コード調査（3+ファイル） | `backend-explorer` | - |
+| コード実装完了 | `backend-code-reviewer` | **必須** |
+| テスト実行・カバレッジ | `backend-test-runner` | - |
+| 包括的品質検証 | `backend-quality-manager` | - |
 
 ## 2段階レビュー（Step 6）
 
@@ -36,9 +29,8 @@
 ## 検証ゲート（Step 7）
 
 完了を主張する前に必ず以下を実行し、**証拠を提示**する：
-- `make test` / `pnpm test` → 全パス確認
-- `make lint` → エラーゼロ確認
-- `make fe-typecheck` → エラーゼロ確認
+- `zig build` → ビルド成功確認
+- `zig build test` → 全テストパス確認
 
 「should work」「probably fine」は完了ではない。
 

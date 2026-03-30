@@ -1,7 +1,8 @@
 const std = @import("std");
 
-pub fn main() void {
-    std.debug.print("sz: disk usage analyzer\n", .{});
+pub fn main() !void {
+    const stdout = std.fs.File.stdout();
+    try stdout.writeAll("sz: disk usage analyzer\n");
 }
 
 test "main compiles" {
