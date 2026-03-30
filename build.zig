@@ -14,6 +14,24 @@ pub fn build(b: *std.Build) void {
     const bar_mod = b.createModule(.{
         .root_source_file = b.path("src/render/bar.zig"),
     });
+    // export/json.zig: JSON出力モジュール
+    const json_export_mod = b.createModule(.{
+        .root_source_file = b.path("src/export/json.zig"),
+    });
+    json_export_mod.addImport("types", types_mod);
+
+    // export/csv.zig: CSV出力モジュール
+    const csv_export_mod = b.createModule(.{
+        .root_source_file = b.path("src/export/csv.zig"),
+    });
+    csv_export_mod.addImport("types", types_mod);
+
+    // export/snapshot.zig: load/save 機能。render/compare.zig から "snapshot" で参照される
+    const shared_snapshot_mod = b.createModule(.{
+        .root_source_file = b.path("src/export/snapshot.zig"),
+    });
+    shared_snapshot_mod.addImport("types", types_mod);
+    shared_snapshot_mod.addImport("json_export", json_export_mod);
 
     // ─── メイン実行ファイル ───────────────────────────────────────────────────
     const exe_mod = b.createModule(.{
@@ -24,6 +42,9 @@ pub fn build(b: *std.Build) void {
     exe_mod.addImport("types", types_mod);
     exe_mod.addImport("size_fmt", size_fmt_mod);
     exe_mod.addImport("bar", bar_mod);
+    exe_mod.addImport("snapshot", shared_snapshot_mod);
+    exe_mod.addImport("json_export", json_export_mod);
+    exe_mod.addImport("csv_export", csv_export_mod);
 
     const exe = b.addExecutable(.{
         .name = "sz",
@@ -52,6 +73,9 @@ pub fn build(b: *std.Build) void {
     test_mod.addImport("types", types_mod);
     test_mod.addImport("size_fmt", size_fmt_mod);
     test_mod.addImport("bar", bar_mod);
+    test_mod.addImport("snapshot", shared_snapshot_mod);
+    test_mod.addImport("json_export", json_export_mod);
+    test_mod.addImport("csv_export", csv_export_mod);
 
     const unit_tests = b.addTest(.{
         .root_module = test_mod,
@@ -145,6 +169,18 @@ pub fn build(b: *std.Build) void {
     const flat_tests = b.addTest(.{ .root_module = flat_test_mod });
     const run_flat_tests = b.addRunArtifact(flat_tests);
 
+    // render/compare.zig テスト (types, size_fmt, snapshot named imports が必要)
+    const compare_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/render/compare.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    compare_test_mod.addImport("types", types_mod);
+    compare_test_mod.addImport("size_fmt", size_fmt_mod);
+    compare_test_mod.addImport("snapshot", shared_snapshot_mod);
+    const compare_tests = b.addTest(.{ .root_module = compare_test_mod });
+    const run_compare_tests = b.addRunArtifact(compare_tests);
+
     // filter/pattern.zig テスト
     const filter_pattern_test_mod = b.createModule(.{
         .root_source_file = b.path("src/filter/pattern.zig"),
@@ -180,6 +216,15 @@ pub fn build(b: *std.Build) void {
     });
     const filter_date_tests = b.addTest(.{ .root_module = filter_date_test_mod });
     const run_filter_date_tests = b.addRunArtifact(filter_date_tests);
+
+    // filter/age.zig テスト
+    const filter_age_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/filter/age.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const filter_age_tests = b.addTest(.{ .root_module = filter_age_test_mod });
+    const run_filter_age_tests = b.addRunArtifact(filter_age_tests);
 
     // tests/filter_test.zig 統合テスト
     const filter_pattern_mod = b.createModule(.{
@@ -226,13 +271,14 @@ pub fn build(b: *std.Build) void {
     const export_csv_tests = b.addTest(.{ .root_module = export_csv_test_mod });
     const run_export_csv_tests = b.addRunArtifact(export_csv_tests);
 
-    // export/snapshot.zig テスト (types named import が必要; json.zig はファイル相対インポート)
+    // export/snapshot.zig テスト (types, json_export named imports が必要)
     const export_snapshot_test_mod = b.createModule(.{
         .root_source_file = b.path("src/export/snapshot.zig"),
         .target = target,
         .optimize = optimize,
     });
     export_snapshot_test_mod.addImport("types", types_mod);
+    export_snapshot_test_mod.addImport("json_export", json_export_mod);
     const export_snapshot_tests = b.addTest(.{ .root_module = export_snapshot_test_mod });
     const run_export_snapshot_tests = b.addRunArtifact(export_snapshot_tests);
 
@@ -309,10 +355,12 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_filter_size_tests.step);
     test_step.dependOn(&run_filter_preset_tests.step);
     test_step.dependOn(&run_filter_date_tests.step);
+    test_step.dependOn(&run_filter_age_tests.step);
     test_step.dependOn(&run_filter_integration_tests.step);
     test_step.dependOn(&run_export_json_tests.step);
     test_step.dependOn(&run_export_csv_tests.step);
     test_step.dependOn(&run_export_snapshot_tests.step);
+    test_step.dependOn(&run_compare_tests.step);
 
     // ─── ベンチマーク ─────────────────────────────────────────────────────────
     const bench_step = b.step("bench", "Run benchmark tests");

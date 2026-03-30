@@ -11,6 +11,9 @@ pub const DirEntry = struct {
     /// ディレクトリツリーの深さ。最大255階層を上限とする（u8: 0-255）。
     /// CLIの --depth 引数（u32）からこのフィールドへ代入する際は clamp が必要。
     depth: u8,
+    /// ディレクトリの最終更新時刻（Unix エポック秒）。--older フィルタで使用。
+    /// デフォルトは 0 (不明/未設定)。
+    mtime: i64 = 0,
 
     /// name フィールドから Zig スライスとして名前を取得する。
     pub fn nameSlice(self: *const DirEntry) []const u8 {
@@ -39,7 +42,21 @@ test "DirEntry nameSlice" {
 }
 
 test "DirEntry size" {
-    // 1ノードあたり約64bytesを目標とする
+    // 1ノードあたり64bytes以内を目標とする (mtime追加後は64bytes)
     const size = @sizeOf(DirEntry);
     try std.testing.expect(size <= 64);
+}
+
+test "DirEntry mtime default" {
+    const name = "dir";
+    const entry = DirEntry{
+        .name = name.ptr,
+        .name_len = @intCast(name.len),
+        .total_size = 0,
+        .file_count = 0,
+        .dir_count = 0,
+        .children = &.{},
+        .depth = 0,
+    };
+    try std.testing.expectEqual(@as(i64, 0), entry.mtime);
 }

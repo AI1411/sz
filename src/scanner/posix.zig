@@ -7,11 +7,24 @@ pub const ScanOptions = struct {
     follow_symlinks: bool = false,
     /// マウントポイントを越えてスキャンするか（デフォルト: 越えない）
     cross_mount: bool = false,
+    /// true = ファイルサイズ(st_size)を使用、false = ディスク使用量(st_blocks × 512)
+    apparent: bool = false,
 };
 
 fn getDeviceId(dir: std.fs.Dir) !posix.dev_t {
     const stat = try posix.fstat(dir.fd);
     return stat.dev;
+}
+
+/// プラットフォーム非依存で posix.Stat から mtime (秒) を取得する。
+fn getStatMtime(stat: posix.Stat) i64 {
+    // Linux: stat.mtim.tv_sec / macOS: stat.mtimespec.sec
+    if (comptime @hasField(posix.Stat, "mtim")) {
+        return @intCast(stat.mtim.tv_sec);
+    } else if (comptime @hasField(posix.Stat, "mtimespec")) {
+        return @intCast(stat.mtimespec.sec);
+    }
+    return 0;
 }
 
 /// (dev, inode) を 128 ビットキーに変換してループ検出に使用する。
@@ -36,6 +49,12 @@ fn scanDirRecursive(
     var file_count: u32 = 0;
     var dir_count: u32 = 0;
     var children: std.ArrayList(types.DirEntry) = .{};
+
+    // ディレクトリ自身の mtime を取得する
+    const dir_mtime: i64 = blk: {
+        const raw = posix.fstat(dir.fd) catch break :blk 0;
+        break :blk getStatMtime(raw);
+    };
 
     var iter = dir.iterate();
     while (try iter.next()) |entry| {
@@ -132,8 +151,13 @@ fn scanDirRecursive(
                 try children.append(allocator, child);
             },
             .file => {
-                const st = dir.statFile(entry.name) catch continue;
-                total_size += st.size;
+                if (options.apparent) {
+                    const st = dir.statFile(entry.name) catch continue;
+                    total_size += st.size;
+                } else {
+                    const os_stat = posix.fstatat(dir.fd, entry.name, posix.AT.SYMLINK_NOFOLLOW) catch continue;
+                    total_size += if (os_stat.blocks > 0) @as(u64, @intCast(os_stat.blocks)) * 512 else 0;
+                }
                 file_count += 1;
             },
             else => {},
@@ -150,6 +174,7 @@ fn scanDirRecursive(
         .dir_count = dir_count,
         .children = try children.toOwnedSlice(allocator),
         .depth = depth,
+        .mtime = dir_mtime,
     };
 }
 
@@ -222,7 +247,7 @@ test "scan: recursive scan and size aggregation" {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = try tmp.dir.realpath(".", &path_buf);
 
-    const result = try scan(arena.allocator(), path, .{});
+    const result = try scan(arena.allocator(), path, .{ .apparent = true });
     try std.testing.expectEqual(@as(u64, 22), result.root.total_size);
     try std.testing.expectEqual(@as(u32, 3), result.root.file_count);
     try std.testing.expectEqual(@as(u32, 1), result.root.dir_count);
@@ -250,7 +275,7 @@ test "scan: symlinks not followed by default" {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = try tmp.dir.realpath(".", &path_buf);
 
-    const result = try scan(arena.allocator(), path, .{});
+    const result = try scan(arena.allocator(), path, .{ .apparent = true });
     try std.testing.expectEqual(@as(u32, 1), result.root.file_count);
     try std.testing.expectEqual(@as(u64, 4), result.root.total_size);
 }
@@ -273,12 +298,12 @@ test "scan: follow_symlinks=true counts symlinked file" {
     const path = try tmp.dir.realpath(".", &path_buf);
 
     // follow_symlinks=false: only real.txt counted
-    const result_no = try scan(arena.allocator(), path, .{ .follow_symlinks = false });
+    const result_no = try scan(arena.allocator(), path, .{ .follow_symlinks = false, .apparent = true });
     try std.testing.expectEqual(@as(u32, 1), result_no.root.file_count);
     try std.testing.expectEqual(@as(u64, 5), result_no.root.total_size);
 
     // follow_symlinks=true: real.txt + link.txt (both point to same 5-byte content)
-    const result_yes = try scan(arena.allocator(), path, .{ .follow_symlinks = true });
+    const result_yes = try scan(arena.allocator(), path, .{ .follow_symlinks = true, .apparent = true });
     try std.testing.expectEqual(@as(u32, 2), result_yes.root.file_count);
     try std.testing.expectEqual(@as(u64, 10), result_yes.root.total_size);
 }
@@ -309,7 +334,7 @@ test "scan: permission denied directory is skipped" {
     defer arena.deinit();
 
     const root_path = try tmp.dir.realpath(".", &path_buf);
-    const result = try scan(arena.allocator(), root_path, .{});
+    const result = try scan(arena.allocator(), root_path, .{ .apparent = true });
 
     try std.posix.fchmodat(std.posix.AT.FDCWD, dir_path, 0o755, 0);
 

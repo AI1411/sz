@@ -24,6 +24,8 @@ pub const ScanNode = struct {
     remaining_children: std.atomic.Value(u32) = .{ .raw = 0 },
     /// 親ノードへの参照 (null = ルート)
     parent: ?*ScanNode = null,
+    /// ディレクトリの最終更新時刻 (Unix エポック秒)
+    mtime: i64 = 0,
 
     pub fn addSize(self: *ScanNode, size: u64) void {
         _ = self.total_size.fetchAdd(size, .monotonic);
@@ -51,11 +53,30 @@ pub const WorkerContext = struct {
     root_dev: posix.dev_t,
     follow_symlinks: bool,
     cross_mount: bool,
+    /// true = ファイルサイズ(st_size)を使用、false = ディスク使用量(st_blocks × 512)
+    apparent: bool = false,
 };
 
 fn getDeviceId(dir: std.fs.Dir) !posix.dev_t {
     const stat = try posix.fstat(dir.fd);
     return stat.dev;
+}
+
+/// プラットフォーム非依存で posix.Stat から mtime (秒) を取得する。
+fn getStatMtime(stat: posix.Stat) i64 {
+    // Linux: stat.mtim.tv_sec / macOS: stat.mtimespec.sec
+    if (comptime @hasField(posix.Stat, "mtim")) {
+        return @intCast(stat.mtim.tv_sec);
+    } else if (comptime @hasField(posix.Stat, "mtimespec")) {
+        return @intCast(stat.mtimespec.sec);
+    }
+    return 0;
+}
+
+/// posix.fstatat でファイルのディスク使用量 (st_blocks × 512) を取得する。
+fn getDiskSize(dir: std.fs.Dir, name: []const u8) !u64 {
+    const os_stat = try posix.fstatat(dir.fd, name, posix.AT.SYMLINK_NOFOLLOW);
+    return if (os_stat.blocks > 0) @as(u64, @intCast(os_stat.blocks)) * 512 else 0;
 }
 
 /// ワーカースレッドのエントリポイント。
@@ -79,6 +100,12 @@ fn processDir(ctx: *WorkerContext, item: queue_mod.WorkItem) !void {
     const dir_dev = getDeviceId(dir) catch return;
     if (!ctx.cross_mount and dir_dev != ctx.root_dev) return;
 
+    // ディレクトリ自身の mtime を取得する
+    const dir_raw_stat = posix.fstat(dir.fd) catch null;
+    if (dir_raw_stat) |s| {
+        node.mtime = getStatMtime(s);
+    }
+
     var iter = dir.iterate();
     while (iter.next() catch null) |entry| {
         var kind = entry.kind;
@@ -89,8 +116,13 @@ fn processDir(ctx: *WorkerContext, item: queue_mod.WorkItem) !void {
 
         switch (kind) {
             .file => {
-                const st = dir.statFile(entry.name) catch continue;
-                node.addSize(st.size);
+                if (ctx.apparent) {
+                    const st = dir.statFile(entry.name) catch continue;
+                    node.addSize(st.size);
+                } else {
+                    const sz = getDiskSize(dir, entry.name) catch 0;
+                    node.addSize(sz);
+                }
                 node.addFile();
             },
             .sym_link => {
@@ -98,7 +130,12 @@ fn processDir(ctx: *WorkerContext, item: queue_mod.WorkItem) !void {
                 const st = dir.statFile(entry.name) catch continue;
                 switch (st.kind) {
                     .file => {
-                        node.addSize(st.size);
+                        if (ctx.apparent) {
+                            node.addSize(st.size);
+                        } else {
+                            const sz = getDiskSize(dir, entry.name) catch 0;
+                            node.addSize(sz);
+                        }
                         node.addFile();
                     },
                     .directory => {
@@ -174,6 +211,7 @@ test "worker: file sizes are accumulated atomically" {
         .root_dev = root_stat.dev,
         .follow_symlinks = false,
         .cross_mount = false,
+        .apparent = true, // 正確なバイト数をテストするため apparent size を使用
     };
 
     try q.enqueue(.{ .path = dir_path_copy, .context = &root_node });

@@ -3,7 +3,6 @@
 /// Issue #12: スキャナーユニットテスト
 /// Issue #13: シンボリックリンクのループ検出テスト
 /// Issue #14: 権限なしディレクトリのスキップテスト
-
 const std = @import("std");
 const scanner = @import("scanner");
 
@@ -42,7 +41,7 @@ test "scan: single file size aggregation" {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = try tmp.dir.realpath(".", &path_buf);
 
-    const result = try scanner.scan(arena.allocator(), path, .{});
+    const result = try scanner.scan(arena.allocator(), path, .{ .apparent = true });
     try std.testing.expectEqual(@as(u64, 11), result.root.total_size);
     try std.testing.expectEqual(@as(u32, 1), result.root.file_count);
     try std.testing.expectEqual(@as(u32, 0), result.root.dir_count);
@@ -68,7 +67,7 @@ test "scan: deep nested structure" {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = try tmp.dir.realpath(".", &path_buf);
 
-    const result = try scanner.scan(arena.allocator(), path, .{});
+    const result = try scanner.scan(arena.allocator(), path, .{ .apparent = true });
     try std.testing.expectEqual(@as(u64, 100), result.root.total_size);
     try std.testing.expectEqual(@as(u32, 1), result.root.file_count);
     try std.testing.expectEqual(@as(u32, 3), result.root.dir_count);
@@ -98,7 +97,7 @@ test "scan: symlink loop does not hang (follow_symlinks=true)" {
     const path = try tmp.dir.realpath(".", &path_buf);
 
     // follow_symlinks=true でも無限再帰にならない (inode ベースのループ検出)
-    const result = try scanner.scan(arena.allocator(), path, .{ .follow_symlinks = true });
+    const result = try scanner.scan(arena.allocator(), path, .{ .follow_symlinks = true, .apparent = true });
     // ファイルは正しく集計される
     try std.testing.expectEqual(@as(u32, 1), result.root.file_count);
     try std.testing.expectEqual(@as(u64, 4), result.root.total_size);
@@ -148,7 +147,7 @@ test "scan: permission denied directory is skipped with warning" {
     defer arena.deinit();
 
     const root_path = try tmp.dir.realpath(".", &path_buf);
-    const result = try scanner.scan(arena.allocator(), root_path, .{});
+    const result = try scanner.scan(arena.allocator(), root_path, .{ .apparent = true });
 
     // 権限復元
     try std.posix.fchmodat(std.posix.AT.FDCWD, dir_path, 0o755, 0);
@@ -187,7 +186,7 @@ test "scan: permission denied does not stop remaining scan" {
     defer arena.deinit();
 
     const root_path = try tmp.dir.realpath(".", &path_buf);
-    const result = try scanner.scan(arena.allocator(), root_path, .{});
+    const result = try scanner.scan(arena.allocator(), root_path, .{ .apparent = true });
 
     try std.posix.fchmodat(std.posix.AT.FDCWD, dir_path, 0o755, 0);
 
@@ -204,7 +203,7 @@ test "fixture: multi_files - known size aggregation" {
 
     // tests/fixtures/test_tree/multi_files: 100 + 200 + 50 = 350 bytes
     const path = "tests/fixtures/test_tree/multi_files";
-    const result = try scanner.scan(arena.allocator(), path, .{});
+    const result = try scanner.scan(arena.allocator(), path, .{ .apparent = true });
     try std.testing.expectEqual(@as(u64, 350), result.root.total_size);
     try std.testing.expectEqual(@as(u32, 3), result.root.file_count);
 }
@@ -215,7 +214,7 @@ test "fixture: deep nested - correct depth" {
 
     // tests/fixtures/test_tree/deep: a/b/c/deep.txt = 1024 bytes, 3 dirs
     const path = "tests/fixtures/test_tree/deep";
-    const result = try scanner.scan(arena.allocator(), path, .{});
+    const result = try scanner.scan(arena.allocator(), path, .{ .apparent = true });
     try std.testing.expectEqual(@as(u64, 1024), result.root.total_size);
     try std.testing.expectEqual(@as(u32, 1), result.root.file_count);
     try std.testing.expectEqual(@as(u32, 3), result.root.dir_count);
@@ -238,7 +237,7 @@ test "fixture: large_dir - 11 files" {
 
     // file_00=10, file_01=20, ..., file_10=110 → sum = 10+20+...+110 = 660 bytes
     const path = "tests/fixtures/test_tree/large_dir";
-    const result = try scanner.scan(arena.allocator(), path, .{});
+    const result = try scanner.scan(arena.allocator(), path, .{ .apparent = true });
     try std.testing.expectEqual(@as(u32, 11), result.root.file_count);
     try std.testing.expectEqual(@as(u64, 660), result.root.total_size);
 }

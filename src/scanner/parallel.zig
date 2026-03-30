@@ -16,6 +16,8 @@ pub const ScanOptions = struct {
     cross_mount: bool = false,
     /// 並列ワーカー数。null = CPU コア数（自動）
     jobs: ?u32 = null,
+    /// true = ファイルサイズ(st_size)を使用、false = ディスク使用量(st_blocks × 512)
+    apparent: bool = false,
 };
 
 fn sizeDescending(_: void, a: types.DirEntry, b: types.DirEntry) bool {
@@ -77,6 +79,7 @@ fn buildDirEntry(
         .dir_count = total_dir_count,
         .children = try children_list.toOwnedSlice(allocator),
         .depth = depth_u8,
+        .mtime = node.mtime,
     };
 }
 
@@ -129,6 +132,7 @@ pub fn scan(
         .root_dev = root_stat.dev,
         .follow_symlinks = options.follow_symlinks,
         .cross_mount = options.cross_mount,
+        .apparent = options.apparent,
     };
 
     // ワーカー数を決定: --jobs 指定があればその値、なければ CPU コア数（最低1スレッド）
@@ -195,7 +199,7 @@ test "scan: recursive scan and size aggregation" {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = try tmp.dir.realpath(".", &path_buf);
 
-    const result = try scan(arena.allocator(), path, .{});
+    const result = try scan(arena.allocator(), path, .{ .apparent = true });
     try std.testing.expectEqual(@as(u64, 22), result.root.total_size);
     try std.testing.expectEqual(@as(u32, 3), result.root.file_count);
     try std.testing.expectEqual(@as(u32, 1), result.root.dir_count);
@@ -241,7 +245,7 @@ test "scan: children are sorted by total_size descending" {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = try tmp.dir.realpath(".", &path_buf);
 
-    const result = try scan(arena.allocator(), path, .{});
+    const result = try scan(arena.allocator(), path, .{ .apparent = true });
     try std.testing.expectEqual(@as(usize, 3), result.root.children.len);
     try std.testing.expect(result.root.children[0].total_size >= result.root.children[1].total_size);
     try std.testing.expect(result.root.children[1].total_size >= result.root.children[2].total_size);
@@ -267,7 +271,7 @@ test "scan: symlinks not followed by default" {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = try tmp.dir.realpath(".", &path_buf);
 
-    const result = try scan(arena.allocator(), path, .{});
+    const result = try scan(arena.allocator(), path, .{ .apparent = true });
     try std.testing.expectEqual(@as(u32, 1), result.root.file_count);
     try std.testing.expectEqual(@as(u64, 4), result.root.total_size);
 }
@@ -289,11 +293,11 @@ test "scan: follow_symlinks=true counts symlinked file" {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const path = try tmp.dir.realpath(".", &path_buf);
 
-    const result_no = try scan(arena.allocator(), path, .{ .follow_symlinks = false });
+    const result_no = try scan(arena.allocator(), path, .{ .follow_symlinks = false, .apparent = true });
     try std.testing.expectEqual(@as(u32, 1), result_no.root.file_count);
     try std.testing.expectEqual(@as(u64, 5), result_no.root.total_size);
 
-    const result_yes = try scan(arena.allocator(), path, .{ .follow_symlinks = true });
+    const result_yes = try scan(arena.allocator(), path, .{ .follow_symlinks = true, .apparent = true });
     try std.testing.expectEqual(@as(u32, 2), result_yes.root.file_count);
     try std.testing.expectEqual(@as(u64, 10), result_yes.root.total_size);
 }
@@ -324,7 +328,7 @@ test "scan: permission denied directory is skipped" {
     defer arena.deinit();
 
     const root_path = try tmp.dir.realpath(".", &path_buf);
-    const result = try scan(arena.allocator(), root_path, .{});
+    const result = try scan(arena.allocator(), root_path, .{ .apparent = true });
 
     try std.posix.fchmodat(std.posix.AT.FDCWD, dir_path, 0o755, 0);
 
